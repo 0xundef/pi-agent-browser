@@ -28,3 +28,6 @@ yarn-error.log*
 pnpm-debug.log*
 .playwright/
 .playwright-cli/
+snap/
+dummy-extension/
+.tmp-*

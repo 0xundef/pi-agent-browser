@@ -3,6 +3,7 @@ import { Type, getEnvApiKey, getModels, type KnownProvider, type Model, type Sta
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import * as bip39 from "bip39";
 
 type FileConfig = {
   provider?: string;
@@ -306,6 +307,26 @@ const shellCommandTool: AgentTool<typeof shellCommandParameters, { stdout: strin
   }
 };
 
+const generateMnemonicParameters = Type.Object({
+  wordCount: Type.Optional(Type.Number({ description: "Number of words in the mnemonic (12 or 24). Defaults to 12." }))
+});
+type GenerateMnemonicParameters = Static<typeof generateMnemonicParameters>;
+
+const generateMnemonicTool: AgentTool<typeof generateMnemonicParameters, { mnemonic: string }> = {
+  name: "generate_mnemonic",
+  label: "Generate Mnemonic",
+  description: "Generates a random BIP39 mnemonic phrase (seed phrase) for crypto wallets.",
+  parameters: generateMnemonicParameters,
+  async execute(_toolCallId: string, params: GenerateMnemonicParameters) {
+    const strength = params.wordCount === 24 ? 256 : 128;
+    const mnemonic = bip39.generateMnemonic(strength);
+    return {
+      content: [{ type: "text", text: `Your generated mnemonic phrase is:\n\n${mnemonic}` }],
+      details: { mnemonic }
+    };
+  }
+};
+
 async function main() {
   const fileConfig = loadFileConfig();
   const runtime = resolveRuntimeConfig(fileConfig);
@@ -323,7 +344,7 @@ async function main() {
     initialState: {
       systemPrompt: runtime.systemPrompt,
       model: getDemoModel(runtime),
-      tools: [getTimeTool, addTool, shellCommandTool]
+      tools: [getTimeTool, addTool, shellCommandTool, generateMnemonicTool]
     },
     getApiKey: (provider: string) =>
       runtime.apiKey ?? getApiKeyForProvider(provider as KnownProvider)
@@ -355,9 +376,13 @@ async function main() {
     }
   });
 
-const prompt = `Test the "add todo" flow on https://demo.playwright.dev/todomvc using playwright-cli.
-you should capthure the screen screenshot after each step.
-Check playwright-cli --help for available commands.`;
+const prompt = `Execute the following operations using the shell_command tool, each page changed should be screenshot:
+
+1. Run: playwright-cli open --config=.playwright/cli.config.json --headed
+2. activate the MetaMask extension in the browser window
+3. assume you are a metamask user and log in with your mnemonic phrase
+
+If any step fails, check the error message and try again. Use playwright-cli --help if needed.`;
   const input =
     prompt.length > 0
       ? prompt

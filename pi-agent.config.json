@@ -3,8 +3,8 @@
     {
       "enalble": true,
       "provider": "anthropic",
-      "model": "claude-sonnet-4-20250514",
-      "anthropicAuthToken": "c6a3156c218942889a9d423b348bcd57.T8v8WViIcjvj2L3O",
+      "model": "claude-opus-4-7",
+      "anthropicAuthToken": "xxx",
       "baseUrl": "https://api.z.ai/api/anthropic",
       "systemPrompt": "You are a helpful assistant. Use tools when they are useful."
     }
