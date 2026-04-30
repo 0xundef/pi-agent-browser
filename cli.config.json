@@ -1,0 +1,18 @@
+{
+  "browser": {
+    "launchOptions": {
+      "args": [
+        "--load-extension=/Users/JOYY/Documents/trae_projects/browseragent/.playwright/extensions/metamask",
+        "--disable-extensions-except=/Users/JOYY/Documents/trae_projects/browseragent/.playwright/extensions/metamask"
+      ]
+    },
+    "browserName": "chromium",
+    "userDataDir": "/Users/JOYY/Documents/trae_projects/browseragent/.playwright/profile"
+  },
+  "context": {
+    "recordHar": {
+      "path": "/Users/JOYY/Documents/trae_projects/browseragent/network-requests.har",
+      "mode": "full"
+    }
+  }
+}
