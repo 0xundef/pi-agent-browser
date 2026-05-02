@@ -327,6 +327,49 @@ const generateMnemonicTool: AgentTool<typeof generateMnemonicParameters, { mnemo
   }
 };
 
+const validateRecordingsParameters = Type.Object({});
+type ValidateRecordingsParameters = Static<typeof validateRecordingsParameters>;
+
+const validateRecordingsTool: AgentTool<typeof validateRecordingsParameters, { valid: boolean; errors: string[] }> = {
+  name: "validate_recordings",
+  label: "Validate recordings.json",
+  description: "Validates that recordings.json has the correct schema. Each entry must have time(string), thinking(string), image(string ending with .png/.jpg). If invalid, returns specific errors.",
+  parameters: validateRecordingsParameters,
+  async execute(_toolCallId: string) {
+    const dataPath = path.join(process.cwd(), "recordings.json");
+    if (!existsSync(dataPath)) {
+      return { content: [{ type: "text", text: "ERROR: recordings.json does not exist. Create it first." }], details: { valid: false, errors: ["file_not_found"] } };
+    }
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(readFileSync(dataPath, "utf8"));
+    } catch {
+      return { content: [{ type: "text", text: "ERROR: recordings.json is not valid JSON." }], details: { valid: false, errors: ["invalid_json"] } };
+    }
+
+    const errors: string[] = [];
+    if (!Array.isArray(parsed)) errors.push("root must be an array");
+    else {
+      parsed.forEach((entry: any, i: number) => {
+        if (typeof entry !== "object" || entry === null) errors.push(`item[${i}]: must be an object`);
+        else {
+          if (typeof entry.time !== "string") errors.push(`item[${i}].time: must be a string, got ${typeof entry.time}`);
+          if (typeof entry.thinking !== "string") errors.push(`item[${i}].thinking: must be a string, got ${typeof entry.thinking}`);
+          if (typeof entry.image !== "string") errors.push(`item[${i}].image: must be a string, got ${typeof entry.image}`);
+          else if (!entry.image.endsWith(".png") && !entry.image.endsWith(".jpg")) errors.push(`item[${i}].image: must end with .png or .jpg`);
+        }
+      });
+      if (parsed.length === 0) errors.push("array must have at least 1 entry");
+    }
+
+    if (errors.length > 0) {
+      return { content: [{ type: "text", text: `INVALID: ${errors.join("; ")}` }], details: { valid: false, errors } };
+    }
+    return { content: [{ type: "text", text: `VALID: ${parsed.length} entries, all have time/thinking/image fields.` }], details: { valid: true, errors: [] } };
+  }
+};
+
 async function main() {
   const fileConfig = loadFileConfig();
   const runtime = resolveRuntimeConfig(fileConfig);
@@ -344,7 +387,7 @@ async function main() {
     initialState: {
       systemPrompt: runtime.systemPrompt,
       model: getDemoModel(runtime),
-      tools: [getTimeTool, addTool, shellCommandTool, generateMnemonicTool]
+      tools: [getTimeTool, addTool, shellCommandTool, generateMnemonicTool, validateRecordingsTool]
     },
     getApiKey: (provider: string) =>
       runtime.apiKey ?? getApiKeyForProvider(provider as KnownProvider)
@@ -381,6 +424,8 @@ const prompt = `Execute the following operations using the shell_command tool, e
 1. Run: playwright-cli open --config=./cli.config.json --headed
 2. activate the MetaMask extension in the browser window
 3. assume you are a metamask user and log in with your mnemonic phrase
+4. finally help me generate the recording.json file to log the operations, and the generated file should meet the constraints.
+
 
 If any step fails, check the error message and try again. Use playwright-cli --help if needed.`;
   const input =
