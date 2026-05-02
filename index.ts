@@ -74,9 +74,9 @@ function loadFileConfig(): FileConfig {
   const requestedPath = parseConfigPath();
   const configPath = requestedPath
     ? path.resolve(requestedPath)
-    : path.resolve(process.cwd(), "pi-agent.config.json");
+    : [path.resolve(process.cwd(), "config.json"), path.resolve(process.cwd(), "pi-agent.config.json")].find(existsSync);
 
-  if (!existsSync(configPath)) {
+  if (!configPath || !existsSync(configPath)) {
     return {};
   }
 

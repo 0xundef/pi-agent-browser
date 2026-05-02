@@ -31,3 +31,5 @@ pnpm-debug.log*
 snap/
 dummy-extension/
 .tmp-*
+config.json
+samples/
