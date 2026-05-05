@@ -32,4 +32,5 @@ snap/
 dummy-extension/
 .tmp-*
 config.json
+cli.config.json
 samples/
