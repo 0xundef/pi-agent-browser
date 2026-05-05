@@ -421,7 +421,7 @@ async function main() {
 
 const prompt = `Execute the following operations using the shell_command tool, each page changed should be screenshot:
 
-1. Run: playwright-cli open --config=./cli.config.json --headed
+1. Run: playwright-cli open --config=./cli.config.json
 2. activate the MetaMask extension in the browser window
 3. assume you are a metamask user and log in with your mnemonic phrase
 4. finally help me generate the recording.json file to log the operations, and the generated file should meet the constraints.
