@@ -2,17 +2,11 @@
   "browser": {
     "launchOptions": {
       "args": [
-        "--load-extension=/Volumes/T7/repos/pi-agent-browser/samples/metamask",
-        "--disable-extensions-except=/Volumes/T7/repos/pi-agent-browser/samples/metamask"
+        "--load-extension=/Users/JOYY/Documents/trae_projects/browseragent/samples/nkbihfbeogaeaoehlefnkodbefgpgknn/13.28.0",
+        "--disable-extensions-except=/Users/JOYY/Documents/trae_projects/browseragent/samples/nkbihfbeogaeaoehlefnkodbefgpgknn/13.28.0"
       ]
     },
     "browserName": "chromium",
-    "userDataDir": "/Volumes/T7/repos/pi-agent-browser/.playwright/profile"
-  },
-  "context": {
-    "recordHar": {
-      "path": "/Volumes/T7/repos/pi-agent-browser/network-requests.har",
-      "mode": "full"
-    }
+    "userDataDir": "/Users/JOYY/Documents/trae_projects/browseragent/samples/nkbihfbeogaeaoehlefnkodbefgpgknn/.playwright/profile"
   }
 }

@@ -1,0 +1,12 @@
+{
+  "providers": [
+    {
+      "enable": true,
+      "provider": "anthropic",
+      "model": "claude-opus-4-7",
+      "anthropicAuthToken": "f095fa9ec3ce4511a358542aeaee57bd.10TP1UIshrGJLRIh",
+      "baseUrl": "https://api.z.ai/api/anthropic",
+      "systemPrompt": "You are a helpful assistant. Use tools when they are useful."
+    }
+  ]
+}

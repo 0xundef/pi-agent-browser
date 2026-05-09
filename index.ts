@@ -1,6 +1,6 @@
 import { Agent, type AgentEvent, type AgentTool } from "@mariozechner/pi-agent-core";
 import { Type, getEnvApiKey, getModels, type KnownProvider, type Model, type Static } from "@mariozechner/pi-ai";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, watch } from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import * as bip39 from "bip39";
@@ -370,6 +370,255 @@ const validateRecordingsTool: AgentTool<typeof validateRecordingsParameters, { v
   }
 };
 
+// ==================== Extension Management ====================
+
+const SAMPLES_DIR = path.resolve(process.cwd(), "samples");
+const EXT_LIST_PATH = path.join(SAMPLES_DIR, "ext_list.json");
+const STATUS_PATH = path.join(SAMPLES_DIR, "status.json");
+
+type ExtListEntry = { id: string; name: string; version: string; index: number };
+type StatusEntry = { id: string; version: string; status: "pending" | "running" | "complete" | "error"; error?: string };
+
+function loadJson<T>(filePath: string, defaultValue: T): T {
+  if (!existsSync(filePath)) return defaultValue;
+  const content = readFileSync(filePath, "utf8").trim();
+  if (!content) return defaultValue;
+  return JSON.parse(content);
+}
+
+function saveJson(filePath: string, data: unknown) {
+  writeFileSync(filePath, JSON.stringify(data, null, 2));
+}
+
+function loadExtList(): ExtListEntry[] {
+  return loadJson(EXT_LIST_PATH, []);
+}
+
+function loadStatus(): StatusEntry[] {
+  return loadJson(STATUS_PATH, []);
+}
+
+function updateStatus(status: StatusEntry[], entry: StatusEntry): StatusEntry[] {
+  const idx = status.findIndex(s => s.id === entry.id);
+  if (idx >= 0) status[idx] = entry;
+  else status.push(entry);
+  saveJson(STATUS_PATH, status);
+  return status;
+}
+
+function createExtensionShellCommandTool(extDir: string): AgentTool<typeof shellCommandParameters, any> {
+  return {
+    name: "shell_command",
+    label: "Execute shell command",
+    description: `Executes a shell command and returns stdout, stderr, and exit code. Default working directory: ${extDir}`,
+    parameters: shellCommandParameters,
+    async execute(_toolCallId: string, params: ShellCommandParameters) {
+      try {
+        const result = execSync(params.command, {
+          cwd: params.cwd ? path.resolve(extDir, params.cwd) : extDir,
+          encoding: "utf8",
+          maxBuffer: 1024 * 1024 * 10
+        });
+        return {
+          content: [{ type: "text", text: result }],
+          details: { stdout: result, stderr: "", exitCode: 0 }
+        };
+      } catch (error: any) {
+        const stdout = error.stdout ?? "";
+        const stderr = error.stderr ?? error.message ?? "";
+        const exitCode = error.status ?? 1;
+        return {
+          content: [{ type: "text", text: stderr || stdout }],
+          details: { stdout, stderr, exitCode }
+        };
+      }
+    }
+  };
+}
+
+function createExtensionValidateTool(extDir: string, extIndex: number): AgentTool<typeof validateRecordingsParameters, any> {
+  return {
+    name: "validate_recordings",
+    label: "Validate recordings.json",
+    description: `Validates that recordings.json in the 'ai_testing/${extIndex}/' subfolder has the correct schema. Each entry must have time(string), thinking(string), image(string ending with .png/.jpg).`,
+    parameters: validateRecordingsParameters,
+    async execute(_toolCallId: string) {
+      const dataPath = path.join(extDir, "ai_testing", String(extIndex), "recordings.json");
+      if (!existsSync(dataPath)) {
+        return { content: [{ type: "text", text: `ERROR: ai_testing/${extIndex}/recordings.json does not exist. Create it first.` }], details: { valid: false, errors: ["file_not_found"] } };
+      }
+      let parsed: any;
+      try {
+        parsed = JSON.parse(readFileSync(dataPath, "utf8"));
+      } catch {
+        return { content: [{ type: "text", text: `ERROR: ai_testing/${extIndex}/recordings.json is not valid JSON.` }], details: { valid: false, errors: ["invalid_json"] } };
+      }
+      const errors: string[] = [];
+      if (!Array.isArray(parsed)) errors.push("root must be an array");
+      else {
+        parsed.forEach((entry: any, i: number) => {
+          if (typeof entry !== "object" || entry === null) errors.push(`item[${i}]: must be an object`);
+          else {
+            if (typeof entry.time !== "string") errors.push(`item[${i}].time: must be a string`);
+            if (typeof entry.thinking !== "string") errors.push(`item[${i}].thinking: must be a string`);
+            if (typeof entry.image !== "string") errors.push(`item[${i}].image: must be a string`);
+            else if (!entry.image.endsWith(".png") && !entry.image.endsWith(".jpg")) errors.push(`item[${i}].image: must end with .png or .jpg`);
+          }
+        });
+        if (parsed.length === 0) errors.push("array must have at least 1 entry");
+      }
+      if (errors.length > 0) {
+        return { content: [{ type: "text", text: `INVALID: ${errors.join("; ")}` }], details: { valid: false, errors } };
+      }
+      return { content: [{ type: "text", text: `VALID: ${parsed.length} entries in ai_testing/${extIndex}/recordings.json, all have time/thinking/image fields.` }], details: { valid: true, errors: [] } };
+    }
+  };
+}
+
+const recordStepParameters = Type.Object({
+  time: Type.String({ description: "ISO 8601 timestamp of the step, e.g. 2026-05-07T10:00:00Z" }),
+  thinking: Type.String({ description: "Description of what was done in this step" }),
+  image: Type.String({ description: "Screenshot filename, must end with .png or .jpg" })
+});
+type RecordStepParameters = Static<typeof recordStepParameters>;
+
+function createExtensionRecordStepTool(extDir: string, extIndex: number): AgentTool<typeof recordStepParameters, { index: number }> {
+  return {
+    name: "record_step",
+    label: "Record operation step",
+    description: `Appends a step entry to recordings.json in the 'ai_testing/${extIndex}/' subfolder. Screenshots will also be saved in this subfolder. Each step must have time (ISO string), thinking (description), and image (screenshot filename ending with .png/.jpg). Creates the file if it does not exist.`,
+    parameters: recordStepParameters,
+    async execute(_toolCallId: string, params: RecordStepParameters) {
+      // Create subfolder inside ai_testing directory
+      const aiTestingDir = path.join(extDir, "ai_testing");
+      const indexSubfolder = path.join(aiTestingDir, String(extIndex));
+      if (!existsSync(indexSubfolder)) {
+        execSync(`mkdir -p "${indexSubfolder}"`);
+      }
+      
+      // Save recordings.json in the ai_testing/index subfolder
+      const dataPath = path.join(indexSubfolder, "recordings.json");
+      let entries: any[] = [];
+      if (existsSync(dataPath)) {
+        try {
+          entries = JSON.parse(readFileSync(dataPath, "utf8"));
+          if (!Array.isArray(entries)) entries = [];
+        } catch {
+          entries = [];
+        }
+      }
+      
+      entries.push({
+        time: params.time,
+        thinking: params.thinking,
+        image: params.image
+      });
+      writeFileSync(dataPath, JSON.stringify(entries, null, 2));
+      return {
+        content: [{ type: "text", text: `Step recorded: #${entries.length} at ${params.time}, saved to ai_testing/${extIndex}/recordings.json` }],
+        details: { index: entries.length }
+      };
+    }
+  };
+}
+
+async function runExtensionAgent(ext: ExtListEntry, runtime: RuntimeConfig) {
+  const extDir = path.join(SAMPLES_DIR, ext.id);
+  const promptPath = path.join(extDir, "prompt.md");
+  // Log the prompt.md path
+
+  console.log(`Using prompt.md from ${promptPath}`);
+
+  if (!existsSync(promptPath)) {
+    throw new Error(`prompt.md not found for extension ${ext.id} at ${promptPath}`);
+  }
+
+  const prompt = readFileSync(promptPath, "utf8");
+
+  const agent = new Agent({
+    initialState: {
+      systemPrompt: runtime.systemPrompt,
+      model: getDemoModel(runtime),
+      tools: [
+        getTimeTool,
+        addTool,
+        createExtensionShellCommandTool(extDir),
+        generateMnemonicTool,
+        createExtensionValidateTool(extDir, ext.index),
+        createExtensionRecordStepTool(extDir, ext.index)
+      ]
+    },
+    getApiKey: (provider: string) =>
+      runtime.apiKey ?? getApiKeyForProvider(provider as KnownProvider)
+  });
+
+  let streamedText = false;
+  let agentError: string | undefined;
+  agent.subscribe((event: AgentEvent) => {
+    // Log text streaming (Agent's response)
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+      streamedText = true;
+      process.stdout.write(event.assistantMessageEvent.delta);
+    }
+    
+    // Log tool calls (when Agent decides to use a tool)
+    if (event.type === "tool_execution_start") {
+      const toolName = event.toolName || "unknown";
+      const toolInput = event.args || {};
+      console.log(`\n🔧 [TOOL CALL] ${toolName}`);
+      console.log(`   Input: ${JSON.stringify(toolInput).substring(0, 200)}`);
+    }
+    
+    // Log tool call results
+    if (event.type === "tool_execution_end") {
+      const toolName = event.toolName || "unknown";
+      const result = event.result;
+      const resultStr = typeof result === "string" ? result : JSON.stringify(result).substring(0, 300);
+      console.log(`\n✅ [TOOL RESULT] ${toolName}`);
+      console.log(`   ${resultStr}`);
+    }
+    
+    // Log thinking/reasoning events (if supported by the Agent)
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
+      const thinking = (event as any).assistantMessageEvent.delta;
+      console.log(`\n💭 [THINKING] ${thinking}`);
+    }
+    
+    // Log message completion
+    if (event.type === "message_end" && (event.message as any).role === "assistant" && !streamedText) {
+      const blocks = (event.message as any).content as Array<any> | undefined;
+      const text = (blocks ?? [])
+        .filter((b) => b?.type === "text" && typeof b.text === "string")
+        .map((b) => b.text)
+        .join("");
+      if (text.length > 0) {
+        streamedText = true;
+        process.stdout.write(text);
+      }
+      const stopReason = (event.message as any).stopReason as string | undefined;
+      const errorMessage = (event.message as any).errorMessage as string | undefined;
+      if (stopReason === "error" && errorMessage) {
+        agentError = errorMessage;
+        process.stderr.write(`\n❌ Error: ${errorMessage}\n`);
+      }
+    }
+    
+    // Log all other events for debugging (optional, can be removed later)
+    if (process.env.DEBUG_AGENT && event.type !== "message_update") {
+      console.log(`\n📡 [EVENT] ${event.type}`);
+      console.log(`   Data: ${JSON.stringify(event).substring(0, 500)}`);
+    }
+  });
+
+  await agent.prompt(prompt);
+  if (agentError) {
+    throw new Error(agentError);
+  }
+  process.stdout.write("\n");
+}
+
+// ==================== Main ====================
+
 async function main() {
   const fileConfig = loadFileConfig();
   const runtime = resolveRuntimeConfig(fileConfig);
@@ -383,58 +632,75 @@ async function main() {
     return;
   }
 
-  const agent = new Agent({
-    initialState: {
-      systemPrompt: runtime.systemPrompt,
-      model: getDemoModel(runtime),
-      tools: [getTimeTool, addTool, shellCommandTool, generateMnemonicTool, validateRecordingsTool]
-    },
-    getApiKey: (provider: string) =>
-      runtime.apiKey ?? getApiKeyForProvider(provider as KnownProvider)
-  });
+  let status = loadStatus();
+  const extList = loadExtList();
+  let isProcessing = false;
 
-  let streamedText = false;
-  agent.subscribe((event: AgentEvent) => {
-    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-      streamedText = true;
-      process.stdout.write(event.assistantMessageEvent.delta);
+  // Initialize status for new extensions
+  for (const ext of extList) {
+    if (!status.find(s => s.id === ext.id)) {
+      status = updateStatus(status, { id: ext.id, version: ext.version, status: "pending" });
     }
+  }
 
-    if (event.type === "message_end" && (event.message as any).role === "assistant" && !streamedText) {
-      const blocks = (event.message as any).content as Array<any> | undefined;
-      const text = (blocks ?? [])
-        .filter((b) => b?.type === "text" && typeof b.text === "string")
-        .map((b) => b.text)
-        .join("");
-      if (text.length > 0) {
-        streamedText = true;
-        process.stdout.write(text);
-      }
-
-      const stopReason = (event.message as any).stopReason as string | undefined;
-      const errorMessage = (event.message as any).errorMessage as string | undefined;
-      if (stopReason === "error" && errorMessage) {
-        process.stderr.write(`\nError: ${errorMessage}\n`);
-      }
+  async function processPending() {
+    if (isProcessing) {
+      console.log(`[${new Date().toISOString()}] Already processing, skipping concurrent call.`);
+      return;
     }
-  });
+    isProcessing = true;
+    try {
+      const currentList = loadExtList();
+      let currentStatus = loadStatus();
 
-const prompt = `Execute the following operations using the shell_command tool, each page changed should be screenshot:
+      for (const ext of currentList) {
+        const s = currentStatus.find(s => s.id === ext.id);
+        if (!s || s.status === "pending" || s.status === "error") {
+          console.log(`[${new Date().toISOString()}] Processing extension: ${ext.id} (${ext.name} v${ext.version})`);
+          currentStatus = updateStatus(currentStatus, { id: ext.id, version: ext.version, status: "running" });
+          try {
+            await runExtensionAgent(ext, runtime);
+            currentStatus = loadStatus();
+            updateStatus(currentStatus, { id: ext.id, version: ext.version, status: "complete" });
+            console.log(`[${new Date().toISOString()}] Completed extension: ${ext.id}`);
+          } catch (e: any) {
+            currentStatus = loadStatus();
+            updateStatus(currentStatus, { id: ext.id, version: ext.version, status: "error", error: e.message });
+            console.error(`[${new Date().toISOString()}] Failed extension: ${ext.id} - ${e.message}`);
+          }
+        }
+      }
+    } finally {
+      isProcessing = false;
+    }
+  }
 
-1. Run: playwright-cli open --config=./cli.config.json
-2. activate the MetaMask extension in the browser window
-3. assume you are a metamask user and log in with your mnemonic phrase
-4. finally help me generate the recording.json file to log the operations, and the generated file should meet the constraints.
+  // Process existing pending extensions
+  await processPending();
 
+  // Watch for new extensions
+  if (existsSync(EXT_LIST_PATH)) {
+    let lastContent = readFileSync(EXT_LIST_PATH, "utf8");
+    const watcher = watch(EXT_LIST_PATH, (eventType) => {
+      if (eventType === "change" && existsSync(EXT_LIST_PATH)) {
+        const newContent = readFileSync(EXT_LIST_PATH, "utf8");
+        if (newContent !== lastContent) {
+          lastContent = newContent;
+          console.log(`[${new Date().toISOString()}] ext_list.json changed, processing...`);
+          processPending().catch(e => console.error("Process pending failed:", e));
+        }
+      }
+    });
 
-If any step fails, check the error message and try again. Use playwright-cli --help if needed.`;
-  const input =
-    prompt.length > 0
-      ? prompt
-      : "What time is it in UTC right now? Use the get_time tool. Also add 123 and 456 using the add tool.";
+    process.on("SIGINT", () => {
+      watcher.close();
+      process.exit(0);
+    });
+  }
 
-  await agent.prompt(input);
-  process.stdout.write("\n");
+  // Keep alive
+  setInterval(() => {}, 60000);
+  console.log(`[${new Date().toISOString()}] Extension monitor started. Watching ${EXT_LIST_PATH}`);
 }
 
 await main();
