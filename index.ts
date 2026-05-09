@@ -373,11 +373,23 @@ const validateRecordingsTool: AgentTool<typeof validateRecordingsParameters, { v
 // ==================== Extension Management ====================
 
 const SAMPLES_DIR = path.resolve(process.cwd(), "samples");
-const EXT_LIST_PATH = path.join(SAMPLES_DIR, "ext_list.json");
-const STATUS_PATH = path.join(SAMPLES_DIR, "status.json");
+const PROCESSINGS_DIR = path.resolve(process.cwd(), "processings");
+const INCOMING_QUEUE_PATH = path.join(SAMPLES_DIR, "incoming_queue.json");
+const LEGACY_EXT_LIST_PATH = path.join(SAMPLES_DIR, "ext_list.json");
+const PROCESSINGS_INCOMING_QUEUE_PATH = path.join(PROCESSINGS_DIR, "incoming_queue.json");
+const STATUS_PATH = path.join(PROCESSINGS_DIR, "status.json");
 
-type ExtListEntry = { id: string; name: string; version: string; index: number };
-type StatusEntry = { id: string; version: string; status: "pending" | "running" | "complete" | "error"; error?: string };
+type QueueEntry = { id: string; name: string; version: string; index: number };
+type QueueEntryWithIncomingTime = QueueEntry & { incoming_time?: string; time?: string };
+type StatusEntry = {
+  id: string;
+  version: string;
+  status: "pending" | "running" | "complete" | "error";
+  error?: string;
+  index?: number;
+  status_time?: string;
+  duration?: number;
+};
 
 function loadJson<T>(filePath: string, defaultValue: T): T {
   if (!existsSync(filePath)) return defaultValue;
@@ -390,18 +402,54 @@ function saveJson(filePath: string, data: unknown) {
   writeFileSync(filePath, JSON.stringify(data, null, 2));
 }
 
-function loadExtList(): ExtListEntry[] {
-  return loadJson(EXT_LIST_PATH, []);
+function loadIncomingQueue(): QueueEntryWithIncomingTime[] {
+  if (existsSync(PROCESSINGS_INCOMING_QUEUE_PATH)) {
+    return loadJson(PROCESSINGS_INCOMING_QUEUE_PATH, []);
+  }
+  if (existsSync(INCOMING_QUEUE_PATH)) {
+    return loadJson(INCOMING_QUEUE_PATH, []);
+  }
+  // Backward compatibility when old filename is still present.
+  return loadJson(LEGACY_EXT_LIST_PATH, []);
 }
 
 function loadStatus(): StatusEntry[] {
   return loadJson(STATUS_PATH, []);
 }
 
-function updateStatus(status: StatusEntry[], entry: StatusEntry): StatusEntry[] {
-  const idx = status.findIndex(s => s.id === entry.id);
-  if (idx >= 0) status[idx] = entry;
-  else status.push(entry);
+function calculateDurationSeconds(incomingTime?: string): number | undefined {
+  if (!incomingTime) return undefined;
+  const incomingMs = Date.parse(incomingTime);
+  if (Number.isNaN(incomingMs)) return undefined;
+  const seconds = Math.floor((Date.now() - incomingMs) / 1000);
+  return Math.max(0, seconds);
+}
+
+function updateStatus(
+  status: StatusEntry[],
+  entry: StatusEntry,
+  queueEntry?: QueueEntryWithIncomingTime
+): StatusEntry[] {
+  const now = new Date().toISOString();
+  const incomingTime = queueEntry?.incoming_time ?? queueEntry?.time;
+  const durationSeconds = calculateDurationSeconds(incomingTime);
+
+  const idx = status.findIndex((s) => s.id === entry.id && s.version === entry.version);
+  const nextEntry: StatusEntry = {
+    ...(idx >= 0 ? status[idx] : {}),
+    ...entry,
+    status_time: now
+  };
+
+  if (durationSeconds !== undefined) {
+    nextEntry.duration = durationSeconds;
+  }
+  if (queueEntry?.index !== undefined) {
+    nextEntry.index = queueEntry.index;
+  }
+
+  if (idx >= 0) status[idx] = nextEntry;
+  else status.push(nextEntry);
   saveJson(STATUS_PATH, status);
   return status;
 }
@@ -522,15 +570,15 @@ function createExtensionRecordStepTool(extDir: string, extIndex: number): AgentT
   };
 }
 
-async function runExtensionAgent(ext: ExtListEntry, runtime: RuntimeConfig) {
-  const extDir = path.join(SAMPLES_DIR, ext.id);
+async function runExtensionAgent(queueEntry: QueueEntry, runtime: RuntimeConfig) {
+  const extDir = path.join(SAMPLES_DIR, queueEntry.id);
   const promptPath = path.join(extDir, "prompt.md");
   // Log the prompt.md path
 
   console.log(`Using prompt.md from ${promptPath}`);
 
   if (!existsSync(promptPath)) {
-    throw new Error(`prompt.md not found for extension ${ext.id} at ${promptPath}`);
+    throw new Error(`prompt.md not found for extension ${queueEntry.id} at ${promptPath}`);
   }
 
   const prompt = readFileSync(promptPath, "utf8");
@@ -544,8 +592,8 @@ async function runExtensionAgent(ext: ExtListEntry, runtime: RuntimeConfig) {
         addTool,
         createExtensionShellCommandTool(extDir),
         generateMnemonicTool,
-        createExtensionValidateTool(extDir, ext.index),
-        createExtensionRecordStepTool(extDir, ext.index)
+        createExtensionValidateTool(extDir, queueEntry.index),
+        createExtensionRecordStepTool(extDir, queueEntry.index)
       ]
     },
     getApiKey: (provider: string) =>
@@ -633,13 +681,17 @@ async function main() {
   }
 
   let status = loadStatus();
-  const extList = loadExtList();
+  const incomingQueue = loadIncomingQueue();
   let isProcessing = false;
 
   // Initialize status for new extensions
-  for (const ext of extList) {
-    if (!status.find(s => s.id === ext.id)) {
-      status = updateStatus(status, { id: ext.id, version: ext.version, status: "pending" });
+  for (const queueEntry of incomingQueue) {
+    if (!status.find((s) => s.id === queueEntry.id && s.version === queueEntry.version)) {
+      status = updateStatus(
+        status,
+        { id: queueEntry.id, version: queueEntry.version, status: "pending" },
+        queueEntry
+      );
     }
   }
 
@@ -650,23 +702,35 @@ async function main() {
     }
     isProcessing = true;
     try {
-      const currentList = loadExtList();
+      const currentQueue = loadIncomingQueue();
       let currentStatus = loadStatus();
 
-      for (const ext of currentList) {
-        const s = currentStatus.find(s => s.id === ext.id);
+      for (const queueEntry of currentQueue) {
+        const s = currentStatus.find((item) => item.id === queueEntry.id && item.version === queueEntry.version);
         if (!s || s.status === "pending" || s.status === "error") {
-          console.log(`[${new Date().toISOString()}] Processing extension: ${ext.id} (${ext.name} v${ext.version})`);
-          currentStatus = updateStatus(currentStatus, { id: ext.id, version: ext.version, status: "running" });
+          console.log(`[${new Date().toISOString()}] Processing extension: ${queueEntry.id} (${queueEntry.name} v${queueEntry.version})`);
+          currentStatus = updateStatus(
+            currentStatus,
+            { id: queueEntry.id, version: queueEntry.version, status: "running" },
+            queueEntry
+          );
           try {
-            await runExtensionAgent(ext, runtime);
+            await runExtensionAgent(queueEntry, runtime);
             currentStatus = loadStatus();
-            updateStatus(currentStatus, { id: ext.id, version: ext.version, status: "complete" });
-            console.log(`[${new Date().toISOString()}] Completed extension: ${ext.id}`);
+            updateStatus(
+              currentStatus,
+              { id: queueEntry.id, version: queueEntry.version, status: "complete" },
+              queueEntry
+            );
+            console.log(`[${new Date().toISOString()}] Completed extension: ${queueEntry.id}`);
           } catch (e: any) {
             currentStatus = loadStatus();
-            updateStatus(currentStatus, { id: ext.id, version: ext.version, status: "error", error: e.message });
-            console.error(`[${new Date().toISOString()}] Failed extension: ${ext.id} - ${e.message}`);
+            updateStatus(
+              currentStatus,
+              { id: queueEntry.id, version: queueEntry.version, status: "error", error: e.message },
+              queueEntry
+            );
+            console.error(`[${new Date().toISOString()}] Failed extension: ${queueEntry.id} - ${e.message}`);
           }
         }
       }
@@ -679,14 +743,19 @@ async function main() {
   await processPending();
 
   // Watch for new extensions
-  if (existsSync(EXT_LIST_PATH)) {
-    let lastContent = readFileSync(EXT_LIST_PATH, "utf8");
-    const watcher = watch(EXT_LIST_PATH, (eventType) => {
-      if (eventType === "change" && existsSync(EXT_LIST_PATH)) {
-        const newContent = readFileSync(EXT_LIST_PATH, "utf8");
+  const queuePath = existsSync(PROCESSINGS_INCOMING_QUEUE_PATH)
+    ? PROCESSINGS_INCOMING_QUEUE_PATH
+    : existsSync(INCOMING_QUEUE_PATH)
+      ? INCOMING_QUEUE_PATH
+      : LEGACY_EXT_LIST_PATH;
+  if (existsSync(queuePath)) {
+    let lastContent = readFileSync(queuePath, "utf8");
+    const watcher = watch(queuePath, (eventType) => {
+      if (eventType === "change" && existsSync(queuePath)) {
+        const newContent = readFileSync(queuePath, "utf8");
         if (newContent !== lastContent) {
           lastContent = newContent;
-          console.log(`[${new Date().toISOString()}] ext_list.json changed, processing...`);
+          console.log(`[${new Date().toISOString()}] queue file changed, processing...`);
           processPending().catch(e => console.error("Process pending failed:", e));
         }
       }
@@ -700,7 +769,7 @@ async function main() {
 
   // Keep alive
   setInterval(() => {}, 60000);
-  console.log(`[${new Date().toISOString()}] Extension monitor started. Watching ${EXT_LIST_PATH}`);
+  console.log(`[${new Date().toISOString()}] Extension monitor started. Watching ${queuePath}`);
 }
 
 await main();

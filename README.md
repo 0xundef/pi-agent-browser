@@ -30,10 +30,20 @@ npm run dev
 | Path | Purpose |
 |---|---|
 | `index.ts` | Main agent entry point |
+| `processings/incoming_queue.json` | Extension queue source file (was `ext_list.json`) |
+| `processings/status.json` | Processing state for each extension |
 | `config.json` | AI provider configuration (model, API key, base URL) |
 | `cli.config.json` | Legacy config (root-level) |
 | `.playwright/cli.config.json` | Playwright CLI launch config (extension, profile, HAR) |
 | `samples/metamask/` | Unpacked MetaMask Chrome extension |
+
+### Queue and Status Fields
+
+- `processings/incoming_queue.json`
+  - `incoming_time`: queue entry creation time in ISO 8601 format
+- `processings/status.json`
+  - `status_time`: last status update time in ISO 8601 format
+  - `duration`: elapsed seconds from `incoming_time` to current status update
 
 ---
 
