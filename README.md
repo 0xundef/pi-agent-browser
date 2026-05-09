@@ -20,7 +20,7 @@ npm install
 npx playwright install chromium
 
 # 3. Configure your AI provider
-#    Edit config.json with your API key, or set env vars:
+#    Edit config/pi-agent.config.json with your API key, or set env vars:
 #    ANTHROPIC_AUTH_TOKEN=xxx npm run dev
 npm run dev
 ```
@@ -29,21 +29,67 @@ npm run dev
 
 | Path | Purpose |
 |---|---|
-| `index.ts` | Main agent entry point |
-| `processings/incoming_queue.json` | Extension queue source file (was `ext_list.json`) |
-| `processings/status.json` | Processing state for each extension |
-| `config.json` | AI provider configuration (model, API key, base URL) |
-| `cli.config.json` | Legacy config (root-level) |
-| `.playwright/cli.config.json` | Playwright CLI launch config (extension, profile, HAR) |
-| `samples/metamask/` | Unpacked MetaMask Chrome extension |
+| `index.ts` | Main prompt-driven processing service entry |
+| `samples/incoming_queue.json` | Primary queue source (兼容 `processings/incoming_queue.json`) |
+| `samples/status.json` | Primary processing state (兼容 `processings/status.json`) |
+| `config/pi-agent.config.json` | AI provider configuration (model, API key, base URL) |
+| `samples/<extensionId>/<version>/` | Unpacked extension exact version directory |
+| `samples/<extensionId>/cli_config.json` | Runtime config (兼容 `cli.config.json`) |
+| `samples/<extensionId>/prompt.md` | Runtime prompt file |
+| `samples/<extensionId>/ai_testing/<index>/` | Agent execution artifacts (`recordings.json` and screenshots) |
+| `scripts/enqueue-task.ts` | Simulate external system queue push |
 
 ### Queue and Status Fields
 
-- `processings/incoming_queue.json`
+- `samples/incoming_queue.json`（兼容 `processings/incoming_queue.json`）
   - `incoming_time`: queue entry creation time in ISO 8601 format
-- `processings/status.json`
+- `samples/status.json`（兼容 `processings/status.json`）
   - `status_time`: last status update time in ISO 8601 format
   - `duration`: elapsed seconds from `incoming_time` to current status update
+
+---
+
+## Processing Flow (Prompt-Agent + Playwright CLI)
+
+`node index.ts` 会启动一个常驻服务，核心规则如下：
+
+1. 仅在服务 `idle` 时才会从 `incoming_queue.json` 取任务。
+2. 每次只取队列中“最新一条”（按 `incoming_time`，同时间按 `index`）。
+3. 处理时会校验扩展固定结构：
+   - `samples/<id>/<version>/` 必须存在
+   - `samples/<id>/cli_config.json`（兼容 `cli.config.json`）必须存在
+   - `samples/<id>/prompt.md` 必须存在
+4. 调用 `runExtensionAgent` 读取 `prompt.md`，由 prompt 驱动 Agent 调用 `playwright-cli` 等工具执行真实流程。
+5. 运行过程中通过 `record_step` 工具向 `samples/<id>/ai_testing/<index>/recordings.json` 持续写入步骤，并保存对应截图。
+6. 完成或失败后，`status.json` 会更新：
+   - `status` (`running` / `complete` / `error`)
+   - `status_time`（当前时间）
+   - `duration`（秒）
+7. 单任务硬超时：每个任务执行存在硬超时，超过后会强制以 `status=error` 收尾，错误信息形如 `Task timed out after <ms>ms (id=..., index=...)`，并刷新 `status_time` / `duration`。
+   - 默认 10 分钟（`600000` ms）。
+   - 通过环境变量 `TASK_TIMEOUT_MS` 覆盖（毫秒），例如：
+     ```bash
+     TASK_TIMEOUT_MS=300000 npm run dev   # 5 分钟
+     ```
+   - 启动日志会打印当前生效的超时值，便于排查任务卡死。
+
+```bash
+npm run dev
+```
+
+### Simulate External Queue Push
+
+新增独立脚本模拟外部系统入队（不会污染 `index.ts`）：
+
+```bash
+# 使用默认参数写入一条任务
+npm run enqueue:task
+
+# 自定义任务参数
+npm run enqueue:task -- --id nkbihfbeogaeaoehlefnkodbefgpgknn --name MetaMask --version 12.17.3_0 --index 1001
+```
+
+脚本会优先写入 `samples/incoming_queue.json`，兼容 `processings/incoming_queue.json`。
 
 ---
 

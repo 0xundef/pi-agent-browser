@@ -1,6 +1,6 @@
 import { Agent, type AgentEvent, type AgentTool } from "@mariozechner/pi-agent-core";
 import { Type, getEnvApiKey, getModels, type KnownProvider, type Model, type Static } from "@mariozechner/pi-ai";
-import { existsSync, readFileSync, writeFileSync, watch } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, watch, writeFileSync } from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import * as bip39 from "bip39";
@@ -74,7 +74,12 @@ function loadFileConfig(): FileConfig {
   const requestedPath = parseConfigPath();
   const configPath = requestedPath
     ? path.resolve(requestedPath)
-    : [path.resolve(process.cwd(), "config.json"), path.resolve(process.cwd(), "pi-agent.config.json")].find(existsSync);
+    : [
+      path.resolve(process.cwd(), "config/config.json"),
+      path.resolve(process.cwd(), "config/pi-agent.config.json"),
+      path.resolve(process.cwd(), "config.json"),
+      path.resolve(process.cwd(), "pi-agent.config.json")
+    ].find(existsSync);
 
   if (!configPath || !existsSync(configPath)) {
     return {};
@@ -374,10 +379,11 @@ const validateRecordingsTool: AgentTool<typeof validateRecordingsParameters, { v
 
 const SAMPLES_DIR = path.resolve(process.cwd(), "samples");
 const PROCESSINGS_DIR = path.resolve(process.cwd(), "processings");
-const INCOMING_QUEUE_PATH = path.join(SAMPLES_DIR, "incoming_queue.json");
-const LEGACY_EXT_LIST_PATH = path.join(SAMPLES_DIR, "ext_list.json");
+const SAMPLES_INCOMING_QUEUE_PATH = path.join(SAMPLES_DIR, "incoming_queue.json");
 const PROCESSINGS_INCOMING_QUEUE_PATH = path.join(PROCESSINGS_DIR, "incoming_queue.json");
-const STATUS_PATH = path.join(PROCESSINGS_DIR, "status.json");
+const LEGACY_EXT_LIST_PATH = path.join(SAMPLES_DIR, "ext_list.json");
+const SAMPLES_STATUS_PATH = path.join(SAMPLES_DIR, "status.json");
+const PROCESSINGS_STATUS_PATH = path.join(PROCESSINGS_DIR, "status.json");
 
 type QueueEntry = { id: string; name: string; version: string; index: number };
 type QueueEntryWithIncomingTime = QueueEntry & { incoming_time?: string; time?: string };
@@ -403,18 +409,36 @@ function saveJson(filePath: string, data: unknown) {
 }
 
 function loadIncomingQueue(): QueueEntryWithIncomingTime[] {
+  if (existsSync(SAMPLES_INCOMING_QUEUE_PATH)) {
+    return loadJson(SAMPLES_INCOMING_QUEUE_PATH, []);
+  }
   if (existsSync(PROCESSINGS_INCOMING_QUEUE_PATH)) {
     return loadJson(PROCESSINGS_INCOMING_QUEUE_PATH, []);
-  }
-  if (existsSync(INCOMING_QUEUE_PATH)) {
-    return loadJson(INCOMING_QUEUE_PATH, []);
   }
   // Backward compatibility when old filename is still present.
   return loadJson(LEGACY_EXT_LIST_PATH, []);
 }
 
 function loadStatus(): StatusEntry[] {
-  return loadJson(STATUS_PATH, []);
+  if (existsSync(SAMPLES_STATUS_PATH)) {
+    return loadJson(SAMPLES_STATUS_PATH, []);
+  }
+  if (existsSync(PROCESSINGS_STATUS_PATH)) {
+    return loadJson(PROCESSINGS_STATUS_PATH, []);
+  }
+  return [];
+}
+
+function saveStatus(status: StatusEntry[]) {
+  const statusPayload = JSON.stringify(status, null, 2);
+  const writablePaths = [SAMPLES_STATUS_PATH, PROCESSINGS_STATUS_PATH];
+  for (const filePath of writablePaths) {
+    const dir = path.dirname(filePath);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+    writeFileSync(filePath, statusPayload);
+  }
 }
 
 function calculateDurationSeconds(incomingTime?: string): number | undefined {
@@ -450,8 +474,59 @@ function updateStatus(
 
   if (idx >= 0) status[idx] = nextEntry;
   else status.push(nextEntry);
-  saveJson(STATUS_PATH, status);
+  saveStatus(status);
   return status;
+}
+
+function parseIncomingTime(value?: string): number {
+  if (!value) return 0;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+function pickLatestQueueEntry(queue: QueueEntryWithIncomingTime[]): QueueEntryWithIncomingTime | undefined {
+  if (queue.length === 0) return undefined;
+  const sorted = [...queue].sort((a, b) => {
+    const timeDiff = parseIncomingTime(b.incoming_time ?? b.time) - parseIncomingTime(a.incoming_time ?? a.time);
+    if (timeDiff !== 0) return timeDiff;
+    return (b.index ?? 0) - (a.index ?? 0);
+  });
+  return sorted[0];
+}
+
+function resolveCliConfigPath(extensionRootDir: string): string | undefined {
+  const preferred = path.join(extensionRootDir, "cli_config.json");
+  if (existsSync(preferred)) return preferred;
+  const compat = path.join(extensionRootDir, "cli.config.json");
+  if (existsSync(compat)) return compat;
+  return undefined;
+}
+
+function ensureExtensionFiles(queueEntry: QueueEntryWithIncomingTime) {
+  const extensionRootDir = path.join(SAMPLES_DIR, queueEntry.id);
+  const versionDir = path.join(extensionRootDir, queueEntry.version);
+  const promptPath = path.join(extensionRootDir, "prompt.md");
+  const cliConfigPath = resolveCliConfigPath(extensionRootDir);
+
+  if (!existsSync(extensionRootDir)) {
+    throw new Error(`扩展目录不存在: ${extensionRootDir}`);
+  }
+  if (!existsSync(versionDir)) {
+    throw new Error(`扩展版本目录不存在: ${versionDir}`);
+  }
+  if (!existsSync(promptPath)) {
+    throw new Error(`prompt.md 不存在: ${promptPath}`);
+  }
+  if (!cliConfigPath) {
+    throw new Error(`cli_config.json 不存在（兼容 cli.config.json）: ${extensionRootDir}`);
+  }
+
+  return {
+    extensionRootDir,
+    versionDir,
+    promptPath,
+    cliConfigPath
+  };
 }
 
 function createExtensionShellCommandTool(extDir: string): AgentTool<typeof shellCommandParameters, any> {
@@ -571,7 +646,7 @@ function createExtensionRecordStepTool(extDir: string, extIndex: number): AgentT
 }
 
 async function runExtensionAgent(queueEntry: QueueEntry, runtime: RuntimeConfig) {
-  const extDir = path.join(SAMPLES_DIR, queueEntry.id);
+  const { extensionRootDir: extDir } = ensureExtensionFiles(queueEntry);
   const promptPath = path.join(extDir, "prompt.md");
   // Log the prompt.md path
 
@@ -667,71 +742,107 @@ async function runExtensionAgent(queueEntry: QueueEntry, runtime: RuntimeConfig)
 
 // ==================== Main ====================
 
-async function main() {
-  const fileConfig = loadFileConfig();
-  const runtime = resolveRuntimeConfig(fileConfig);
-  const provider = runtime.provider;
-  const apiKey = runtime.apiKey;
-  if (!apiKey) {
-    process.stderr.write(
-      `Missing API credentials for provider '${provider}'. Set ${envVarHintForProvider(provider)} (or configure OAuth/ADC as needed).\n`,
+const DEFAULT_TASK_TIMEOUT_MS = 10 * 60 * 1000; // 10 分钟
+
+function resolveTaskTimeoutMs(): number {
+  const raw = process.env.TASK_TIMEOUT_MS;
+  if (!raw) return DEFAULT_TASK_TIMEOUT_MS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.warn(
+      `[${new Date().toISOString()}] Invalid TASK_TIMEOUT_MS=${raw}, fallback to default ${DEFAULT_TASK_TIMEOUT_MS}ms`
     );
-    process.exitCode = 1;
-    return;
+    return DEFAULT_TASK_TIMEOUT_MS;
   }
+  return Math.floor(parsed);
+}
 
-  let status = loadStatus();
-  const incomingQueue = loadIncomingQueue();
-  let isProcessing = false;
-
-  // Initialize status for new extensions
-  for (const queueEntry of incomingQueue) {
-    if (!status.find((s) => s.id === queueEntry.id && s.version === queueEntry.version)) {
-      status = updateStatus(
-        status,
-        { id: queueEntry.id, version: queueEntry.version, status: "pending" },
-        queueEntry
-      );
+async function runWithTimeout<T>(
+  work: Promise<T>,
+  timeoutMs: number,
+  taskLabel: string
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`Task timed out after ${timeoutMs}ms (${taskLabel})`));
+    }, timeoutMs);
+    if (typeof timer.unref === "function") {
+      timer.unref();
     }
+  });
+  try {
+    return await Promise.race([work, timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
+}
 
-  async function processPending() {
+async function main() {
+  let isProcessing = false;
+  const runtime = resolveRuntimeConfig(loadFileConfig());
+  const taskTimeoutMs = resolveTaskTimeoutMs();
+
+  async function tryProcessLatest(reason: string) {
     if (isProcessing) {
-      console.log(`[${new Date().toISOString()}] Already processing, skipping concurrent call.`);
+      console.log(`[${new Date().toISOString()}] Service busy, skip pick (${reason}).`);
       return;
     }
     isProcessing = true;
     try {
-      const currentQueue = loadIncomingQueue();
-      let currentStatus = loadStatus();
+      const queue = loadIncomingQueue();
+      const latest = pickLatestQueueEntry(queue);
+      if (!latest) {
+        console.log(`[${new Date().toISOString()}] Queue empty, idle (${reason}).`);
+        return;
+      }
 
-      for (const queueEntry of currentQueue) {
-        const s = currentStatus.find((item) => item.id === queueEntry.id && item.version === queueEntry.version);
-        if (!s || s.status === "pending" || s.status === "error") {
-          console.log(`[${new Date().toISOString()}] Processing extension: ${queueEntry.id} (${queueEntry.name} v${queueEntry.version})`);
-          currentStatus = updateStatus(
-            currentStatus,
-            { id: queueEntry.id, version: queueEntry.version, status: "running" },
-            queueEntry
+      let status = loadStatus();
+      const latestStatus = status.find((s) => s.id === latest.id && s.version === latest.version);
+      if (latestStatus && latestStatus.index === latest.index && (latestStatus.status === "running" || latestStatus.status === "complete")) {
+        console.log(`[${new Date().toISOString()}] Latest already handled (id=${latest.id}, index=${latest.index}, status=${latestStatus.status}).`);
+        return;
+      }
+
+      console.log(`[${new Date().toISOString()}] Pick latest task (idle -> running): id=${latest.id}, version=${latest.version}, index=${latest.index}`);
+      status = updateStatus(
+        status,
+        { id: latest.id, version: latest.version, status: "running", index: latest.index, error: undefined },
+        latest
+      );
+
+      const taskLabel = `id=${latest.id}, index=${latest.index}`;
+      try {
+        console.log(
+          `[${new Date().toISOString()}] Prompt-driven flow: runExtensionAgent (${taskLabel}, timeout=${taskTimeoutMs}ms)`
+        );
+        await runWithTimeout(
+          runExtensionAgent(latest, runtime),
+          taskTimeoutMs,
+          taskLabel
+        );
+        status = loadStatus();
+        updateStatus(
+          status,
+          { id: latest.id, version: latest.version, status: "complete", index: latest.index, error: undefined },
+          latest
+        );
+        console.log(`[${new Date().toISOString()}] Completed task: ${taskLabel}`);
+      } catch (error: any) {
+        const errorMessage = error?.message ?? String(error);
+        const isTimeout = typeof errorMessage === "string" && errorMessage.startsWith("Task timed out after");
+        status = loadStatus();
+        updateStatus(
+          status,
+          { id: latest.id, version: latest.version, status: "error", index: latest.index, error: errorMessage },
+          latest
+        );
+        if (isTimeout) {
+          console.error(
+            `[${new Date().toISOString()}] Task TIMEOUT: ${taskLabel}, timeout=${taskTimeoutMs}ms, marked as error.`
           );
-          try {
-            await runExtensionAgent(queueEntry, runtime);
-            currentStatus = loadStatus();
-            updateStatus(
-              currentStatus,
-              { id: queueEntry.id, version: queueEntry.version, status: "complete" },
-              queueEntry
-            );
-            console.log(`[${new Date().toISOString()}] Completed extension: ${queueEntry.id}`);
-          } catch (e: any) {
-            currentStatus = loadStatus();
-            updateStatus(
-              currentStatus,
-              { id: queueEntry.id, version: queueEntry.version, status: "error", error: e.message },
-              queueEntry
-            );
-            console.error(`[${new Date().toISOString()}] Failed extension: ${queueEntry.id} - ${e.message}`);
-          }
+        } else {
+          console.error(`[${new Date().toISOString()}] Failed task: ${taskLabel}, error=${errorMessage}`);
         }
       }
     } finally {
@@ -739,37 +850,38 @@ async function main() {
     }
   }
 
-  // Process existing pending extensions
-  await processPending();
-
-  // Watch for new extensions
-  const queuePath = existsSync(PROCESSINGS_INCOMING_QUEUE_PATH)
-    ? PROCESSINGS_INCOMING_QUEUE_PATH
-    : existsSync(INCOMING_QUEUE_PATH)
-      ? INCOMING_QUEUE_PATH
-      : LEGACY_EXT_LIST_PATH;
-  if (existsSync(queuePath)) {
-    let lastContent = readFileSync(queuePath, "utf8");
-    const watcher = watch(queuePath, (eventType) => {
-      if (eventType === "change" && existsSync(queuePath)) {
-        const newContent = readFileSync(queuePath, "utf8");
-        if (newContent !== lastContent) {
-          lastContent = newContent;
-          console.log(`[${new Date().toISOString()}] queue file changed, processing...`);
-          processPending().catch(e => console.error("Process pending failed:", e));
-        }
+  const watchedQueuePaths = [SAMPLES_INCOMING_QUEUE_PATH, PROCESSINGS_INCOMING_QUEUE_PATH, LEGACY_EXT_LIST_PATH]
+    .filter((p) => existsSync(p));
+  const uniquePaths = [...new Set(watchedQueuePaths)];
+  const watchers = uniquePaths.map((queuePath) =>
+    watch(queuePath, (eventType) => {
+      if (eventType === "change") {
+        console.log(`[${new Date().toISOString()}] Queue changed: ${queuePath}`);
+        tryProcessLatest(`watch:${path.basename(queuePath)}`).catch((e) => {
+          console.error(`[${new Date().toISOString()}] tryProcessLatest error: ${e?.message ?? String(e)}`);
+        });
       }
-    });
+    })
+  );
 
-    process.on("SIGINT", () => {
+  await tryProcessLatest("startup");
+  const pollTimer = setInterval(() => {
+    tryProcessLatest("polling").catch((e) => {
+      console.error(`[${new Date().toISOString()}] Polling error: ${e?.message ?? String(e)}`);
+    });
+  }, 3000);
+
+  process.on("SIGINT", () => {
+    for (const watcher of watchers) {
       watcher.close();
-      process.exit(0);
-    });
-  }
+    }
+    clearInterval(pollTimer);
+    process.exit(0);
+  });
 
-  // Keep alive
-  setInterval(() => {}, 60000);
-  console.log(`[${new Date().toISOString()}] Extension monitor started. Watching ${queuePath}`);
+  console.log(
+    `[${new Date().toISOString()}] Processing service started (prompt-driven agent + playwright-cli). Watching queue paths: ${uniquePaths.join(", ")}. Task hard timeout: ${taskTimeoutMs}ms (override via TASK_TIMEOUT_MS).`
+  );
 }
 
 await main();
