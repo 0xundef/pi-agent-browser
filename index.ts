@@ -1,6 +1,7 @@
 import { Agent, type AgentEvent, type AgentTool } from "@mariozechner/pi-agent-core";
 import { Type, getEnvApiKey, getModels, type KnownProvider, type Model, type Static } from "@mariozechner/pi-ai";
-import { existsSync, mkdirSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, watch, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import * as bip39 from "bip39";
@@ -379,13 +380,32 @@ const validateRecordingsTool: AgentTool<typeof validateRecordingsParameters, { v
 
 const SAMPLES_DIR = path.resolve(process.cwd(), "samples");
 const PROCESSINGS_DIR = path.resolve(process.cwd(), "processings");
+const EXTENSION_ANALYZER_DIR = "chrome-extension-analyzer";
+const AGENT_QUEUE_DIR = "agent-queue";
+const extensionStorageRoot = process.env.EXTENSION_STORAGE_ROOT?.trim()
+  ? path.resolve(process.env.EXTENSION_STORAGE_ROOT.trim())
+  : os.tmpdir();
+const EXTENSION_ANALYZER_ROOT = path.join(extensionStorageRoot, EXTENSION_ANALYZER_DIR);
+const AGENT_QUEUE_ROOT = process.env.AGENT_QUEUE_ROOT?.trim()
+  ? path.resolve(process.env.AGENT_QUEUE_ROOT.trim())
+  : path.join(extensionStorageRoot, AGENT_QUEUE_DIR);
+const AGENT_INCOMING_QUEUE_PATH = path.join(AGENT_QUEUE_ROOT, "incoming_queue.json");
+const AGENT_STATUS_PATH = path.join(AGENT_QUEUE_ROOT, "status.json");
 const SAMPLES_INCOMING_QUEUE_PATH = path.join(SAMPLES_DIR, "incoming_queue.json");
 const PROCESSINGS_INCOMING_QUEUE_PATH = path.join(PROCESSINGS_DIR, "incoming_queue.json");
 const LEGACY_EXT_LIST_PATH = path.join(SAMPLES_DIR, "ext_list.json");
 const SAMPLES_STATUS_PATH = path.join(SAMPLES_DIR, "status.json");
 const PROCESSINGS_STATUS_PATH = path.join(PROCESSINGS_DIR, "status.json");
 
-type QueueEntry = { id: string; name: string; version: string; index: number };
+type QueueEntry = {
+  id: string;
+  name?: string;
+  version: string;
+  index?: number;
+  runId?: string;
+  artifactRoot?: string;
+  reason?: string;
+};
 type QueueEntryWithIncomingTime = QueueEntry & { incoming_time?: string; time?: string };
 type StatusEntry = {
   id: string;
@@ -393,8 +413,10 @@ type StatusEntry = {
   status: "pending" | "running" | "complete" | "error";
   error?: string;
   index?: number;
+  runId?: string;
   status_time?: string;
   duration?: number;
+  recordingsPath?: string;
 };
 
 function loadJson<T>(filePath: string, defaultValue: T): T {
@@ -405,10 +427,19 @@ function loadJson<T>(filePath: string, defaultValue: T): T {
 }
 
 function saveJson(filePath: string, data: unknown) {
-  writeFileSync(filePath, JSON.stringify(data, null, 2));
+  const dir = path.dirname(filePath);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  const tmpPath = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+  writeFileSync(tmpPath, `${JSON.stringify(data, null, 2)}\n`);
+  renameSync(tmpPath, filePath);
 }
 
 function loadIncomingQueue(): QueueEntryWithIncomingTime[] {
+  if (existsSync(AGENT_INCOMING_QUEUE_PATH)) {
+    return loadJson(AGENT_INCOMING_QUEUE_PATH, []);
+  }
   if (existsSync(SAMPLES_INCOMING_QUEUE_PATH)) {
     return loadJson(SAMPLES_INCOMING_QUEUE_PATH, []);
   }
@@ -420,6 +451,9 @@ function loadIncomingQueue(): QueueEntryWithIncomingTime[] {
 }
 
 function loadStatus(): StatusEntry[] {
+  if (existsSync(AGENT_STATUS_PATH)) {
+    return loadJson(AGENT_STATUS_PATH, []);
+  }
   if (existsSync(SAMPLES_STATUS_PATH)) {
     return loadJson(SAMPLES_STATUS_PATH, []);
   }
@@ -430,14 +464,11 @@ function loadStatus(): StatusEntry[] {
 }
 
 function saveStatus(status: StatusEntry[]) {
-  const statusPayload = JSON.stringify(status, null, 2);
-  const writablePaths = [SAMPLES_STATUS_PATH, PROCESSINGS_STATUS_PATH];
+  const writablePaths = [AGENT_STATUS_PATH];
+  if (existsSync(SAMPLES_STATUS_PATH)) writablePaths.push(SAMPLES_STATUS_PATH);
+  if (existsSync(PROCESSINGS_STATUS_PATH)) writablePaths.push(PROCESSINGS_STATUS_PATH);
   for (const filePath of writablePaths) {
-    const dir = path.dirname(filePath);
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
-    }
-    writeFileSync(filePath, statusPayload);
+    saveJson(filePath, status);
   }
 }
 
@@ -471,6 +502,13 @@ function updateStatus(
   if (queueEntry?.index !== undefined) {
     nextEntry.index = queueEntry.index;
   }
+  if (queueEntry?.runId) {
+    nextEntry.runId = queueEntry.runId;
+  }
+  const runId = queueEntry?.runId ?? (queueEntry?.index !== undefined ? String(queueEntry.index) : entry.runId);
+  if (runId) {
+    nextEntry.recordingsPath = path.join(resolveExtensionArtifactRoot(queueEntry ?? entry), "ai_testing", runId, "recordings.json");
+  }
 
   if (idx >= 0) status[idx] = nextEntry;
   else status.push(nextEntry);
@@ -489,9 +527,26 @@ function pickLatestQueueEntry(queue: QueueEntryWithIncomingTime[]): QueueEntryWi
   const sorted = [...queue].sort((a, b) => {
     const timeDiff = parseIncomingTime(b.incoming_time ?? b.time) - parseIncomingTime(a.incoming_time ?? a.time);
     if (timeDiff !== 0) return timeDiff;
-    return (b.index ?? 0) - (a.index ?? 0);
+    return getQueueIndex(b) - getQueueIndex(a);
   });
   return sorted[0];
+}
+
+function getQueueIndex(queueEntry: QueueEntry): number {
+  if (queueEntry.index !== undefined && Number.isFinite(queueEntry.index)) return queueEntry.index;
+  const fromRunId = queueEntry.runId ? Date.parse(queueEntry.runId.slice(0, 8)) : NaN;
+  return Number.isNaN(fromRunId) ? 0 : fromRunId;
+}
+
+function getQueueRunId(queueEntry: QueueEntry): string {
+  return queueEntry.runId ?? String(getQueueIndex(queueEntry));
+}
+
+function resolveExtensionArtifactRoot(queueEntry: Pick<QueueEntry, "id" | "version" | "artifactRoot">): string {
+  if (queueEntry.artifactRoot) {
+    return path.resolve(queueEntry.artifactRoot);
+  }
+  return path.join(EXTENSION_ANALYZER_ROOT, queueEntry.id, queueEntry.version);
 }
 
 function resolveCliConfigPath(extensionRootDir: string): string | undefined {
@@ -503,28 +558,28 @@ function resolveCliConfigPath(extensionRootDir: string): string | undefined {
 }
 
 function ensureExtensionFiles(queueEntry: QueueEntryWithIncomingTime) {
-  const extensionRootDir = path.join(SAMPLES_DIR, queueEntry.id);
-  const versionDir = path.join(extensionRootDir, queueEntry.version);
-  const promptPath = path.join(extensionRootDir, "prompt.md");
-  const cliConfigPath = resolveCliConfigPath(extensionRootDir);
+  const artifactRootDir = resolveExtensionArtifactRoot(queueEntry);
+  const legacyExtensionRootDir = path.join(SAMPLES_DIR, queueEntry.id);
+  const promptPath = [
+    path.join(artifactRootDir, "prompt.md"),
+    path.join(legacyExtensionRootDir, "prompt.md")
+  ].find((candidate) => existsSync(candidate));
+  const cliConfigPath = resolveCliConfigPath(artifactRootDir) ?? resolveCliConfigPath(legacyExtensionRootDir);
 
-  if (!existsSync(extensionRootDir)) {
-    throw new Error(`扩展目录不存在: ${extensionRootDir}`);
+  if (!existsSync(artifactRootDir)) {
+    throw new Error(`扩展目录不存在: ${artifactRootDir}`);
   }
-  if (!existsSync(versionDir)) {
-    throw new Error(`扩展版本目录不存在: ${versionDir}`);
-  }
-  if (!existsSync(promptPath)) {
-    throw new Error(`prompt.md 不存在: ${promptPath}`);
+  if (!promptPath) {
+    throw new Error(`prompt.md 不存在: ${artifactRootDir}（或兼容目录 ${legacyExtensionRootDir}）`);
   }
   if (!cliConfigPath) {
-    throw new Error(`cli_config.json 不存在（兼容 cli.config.json）: ${extensionRootDir}`);
+    throw new Error(`cli_config.json 不存在（兼容 cli.config.json）: ${artifactRootDir}`);
   }
 
   return {
-    extensionRootDir,
-    versionDir,
-    promptPath,
+    extensionRootDir: artifactRootDir,
+    versionDir: artifactRootDir,
+    promptPath: promptPath!,
     cliConfigPath
   };
 }
@@ -604,11 +659,12 @@ function applyPlaywrightOpenGuard(command: string, extDir: string, queueEntry: Q
     return command;
   }
 
-  const isolatedProfileDir = path.join(extDir, "ai_testing", String(queueEntry.index), ".playwright-profile");
+  const runId = getQueueRunId(queueEntry);
+  const isolatedProfileDir = path.join(extDir, "ai_testing", runId, ".playwright-profile");
   mkdirSync(isolatedProfileDir, { recursive: true });
   cleanupProfileLocks(isolatedProfileDir);
   console.log(
-    `[${new Date().toISOString()}] [browser-guard] isolated profile enabled: ${isolatedProfileDir} (id=${queueEntry.id}, index=${queueEntry.index})`
+    `[${new Date().toISOString()}] [browser-guard] isolated profile enabled: ${isolatedProfileDir} (id=${queueEntry.id}, runId=${runId})`
   );
   return `${command} --persistent --profile=${JSON.stringify(isolatedProfileDir)}`;
 }
@@ -648,22 +704,22 @@ function createExtensionShellCommandTool(extDir: string, queueEntry: QueueEntry)
   };
 }
 
-function createExtensionValidateTool(extDir: string, extIndex: number): AgentTool<typeof validateRecordingsParameters, any> {
+function createExtensionValidateTool(extDir: string, runId: string): AgentTool<typeof validateRecordingsParameters, any> {
   return {
     name: "validate_recordings",
     label: "Validate recordings.json",
-    description: `Validates that recordings.json in the 'ai_testing/${extIndex}/' subfolder has the correct schema. Each entry must have time(string), thinking(string), image(string ending with .png/.jpg).`,
+    description: `Validates that recordings.json in the 'ai_testing/${runId}/' subfolder has the correct schema. Each entry must have time(string), thinking(string), image(string ending with .png/.jpg).`,
     parameters: validateRecordingsParameters,
     async execute(_toolCallId: string) {
-      const dataPath = path.join(extDir, "ai_testing", String(extIndex), "recordings.json");
+      const dataPath = path.join(extDir, "ai_testing", runId, "recordings.json");
       if (!existsSync(dataPath)) {
-        return { content: [{ type: "text", text: `ERROR: ai_testing/${extIndex}/recordings.json does not exist. Create it first.` }], details: { valid: false, errors: ["file_not_found"] } };
+        return { content: [{ type: "text", text: `ERROR: ai_testing/${runId}/recordings.json does not exist. Create it first.` }], details: { valid: false, errors: ["file_not_found"] } };
       }
       let parsed: any;
       try {
         parsed = JSON.parse(readFileSync(dataPath, "utf8"));
       } catch {
-        return { content: [{ type: "text", text: `ERROR: ai_testing/${extIndex}/recordings.json is not valid JSON.` }], details: { valid: false, errors: ["invalid_json"] } };
+        return { content: [{ type: "text", text: `ERROR: ai_testing/${runId}/recordings.json is not valid JSON.` }], details: { valid: false, errors: ["invalid_json"] } };
       }
       const errors: string[] = [];
       if (!Array.isArray(parsed)) errors.push("root must be an array");
@@ -682,7 +738,7 @@ function createExtensionValidateTool(extDir: string, extIndex: number): AgentToo
       if (errors.length > 0) {
         return { content: [{ type: "text", text: `INVALID: ${errors.join("; ")}` }], details: { valid: false, errors } };
       }
-      return { content: [{ type: "text", text: `VALID: ${parsed.length} entries in ai_testing/${extIndex}/recordings.json, all have time/thinking/image fields.` }], details: { valid: true, errors: [] } };
+      return { content: [{ type: "text", text: `VALID: ${parsed.length} entries in ai_testing/${runId}/recordings.json, all have time/thinking/image fields.` }], details: { valid: true, errors: [] } };
     }
   };
 }
@@ -694,16 +750,16 @@ const recordStepParameters = Type.Object({
 });
 type RecordStepParameters = Static<typeof recordStepParameters>;
 
-function createExtensionRecordStepTool(extDir: string, extIndex: number): AgentTool<typeof recordStepParameters, { index: number }> {
+function createExtensionRecordStepTool(extDir: string, runId: string): AgentTool<typeof recordStepParameters, { index: number }> {
   return {
     name: "record_step",
     label: "Record operation step",
-    description: `Appends a step entry to recordings.json in the 'ai_testing/${extIndex}/' subfolder. Screenshots will also be saved in this subfolder. Each step must have time (ISO string), thinking (description), and image (screenshot filename ending with .png/.jpg). Creates the file if it does not exist.`,
+    description: `Appends a step entry to recordings.json in the 'ai_testing/${runId}/' subfolder. Screenshots will also be saved in this subfolder. Each step must have time (ISO string), thinking (description), and image (screenshot filename ending with .png/.jpg). Creates the file if it does not exist.`,
     parameters: recordStepParameters,
     async execute(_toolCallId: string, params: RecordStepParameters) {
       // Create subfolder inside ai_testing directory
       const aiTestingDir = path.join(extDir, "ai_testing");
-      const indexSubfolder = path.join(aiTestingDir, String(extIndex));
+      const indexSubfolder = path.join(aiTestingDir, runId);
       if (!existsSync(indexSubfolder)) {
         execSync(`mkdir -p "${indexSubfolder}"`);
       }
@@ -727,16 +783,16 @@ function createExtensionRecordStepTool(extDir: string, extIndex: number): AgentT
       });
       writeFileSync(dataPath, JSON.stringify(entries, null, 2));
       return {
-        content: [{ type: "text", text: `Step recorded: #${entries.length} at ${params.time}, saved to ai_testing/${extIndex}/recordings.json` }],
+        content: [{ type: "text", text: `Step recorded: #${entries.length} at ${params.time}, saved to ai_testing/${runId}/recordings.json` }],
         details: { index: entries.length }
       };
     }
   };
 }
 
-async function runExtensionAgent(queueEntry: QueueEntry, runtime: RuntimeConfig) {
-  const { extensionRootDir: extDir } = ensureExtensionFiles(queueEntry);
-  const promptPath = path.join(extDir, "prompt.md");
+async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime: RuntimeConfig) {
+  const { extensionRootDir: extDir, promptPath } = ensureExtensionFiles(queueEntry);
+  const runId = getQueueRunId(queueEntry);
   // Log the prompt.md path
 
   console.log(`Using prompt.md from ${promptPath}`);
@@ -756,8 +812,8 @@ async function runExtensionAgent(queueEntry: QueueEntry, runtime: RuntimeConfig)
         addTool,
         createExtensionShellCommandTool(extDir, queueEntry),
         generateMnemonicTool,
-        createExtensionValidateTool(extDir, queueEntry.index),
-        createExtensionRecordStepTool(extDir, queueEntry.index)
+        createExtensionValidateTool(extDir, runId),
+        createExtensionRecordStepTool(extDir, runId)
       ]
     },
     getApiKey: (provider: string) =>
@@ -909,33 +965,48 @@ async function main() {
     try {
       const queue = loadIncomingQueue();
       const scopedQueue = eidFilter ? queue.filter((e) => e.id === eidFilter) : queue;
-      const latest = pickLatestQueueEntry(scopedQueue);
+      let status = loadStatus();
+      const unhandledQueue = scopedQueue.filter((entry) => {
+        const entryRunId = getQueueRunId(entry);
+        const entryStatus = status.find(
+          (s) =>
+            s.id === entry.id &&
+            s.version === entry.version &&
+            (s.runId === entryRunId || s.index === entry.index)
+        );
+        return !entryStatus || (entryStatus.status !== "running" && entryStatus.status !== "complete");
+      });
+      const latest = pickLatestQueueEntry(unhandledQueue);
       if (!latest) {
         if (eidFilter && queue.length > 0) {
           console.log(
-            `[${new Date().toISOString()}] No queue entry for eid=${eidFilter} (${queue.length} other entr${queue.length === 1 ? "y" : "ies"} skipped), idle (${reason}).`
+            `[${new Date().toISOString()}] No unhandled queue entry for eid=${eidFilter} (${queue.length} total entr${queue.length === 1 ? "y" : "ies"}), idle (${reason}).`
           );
         } else {
-          console.log(`[${new Date().toISOString()}] Queue empty, idle (${reason}).`);
+          console.log(`[${new Date().toISOString()}] Queue empty or already handled, idle (${reason}).`);
         }
         return;
       }
 
-      let status = loadStatus();
       const latestStatus = status.find((s) => s.id === latest.id && s.version === latest.version);
-      if (latestStatus && latestStatus.index === latest.index && (latestStatus.status === "running" || latestStatus.status === "complete")) {
-        console.log(`[${new Date().toISOString()}] Latest already handled (id=${latest.id}, index=${latest.index}, status=${latestStatus.status}).`);
+      const latestRunId = getQueueRunId(latest);
+      if (
+        latestStatus &&
+        (latestStatus.runId === latestRunId || latestStatus.index === latest.index) &&
+        (latestStatus.status === "running" || latestStatus.status === "complete")
+      ) {
+        console.log(`[${new Date().toISOString()}] Latest already handled (id=${latest.id}, runId=${latestRunId}, status=${latestStatus.status}).`);
         return;
       }
 
-      console.log(`[${new Date().toISOString()}] Pick latest task (idle -> running): id=${latest.id}, version=${latest.version}, index=${latest.index}`);
+      console.log(`[${new Date().toISOString()}] Pick latest task (idle -> running): id=${latest.id}, version=${latest.version}, runId=${latestRunId}`);
       status = updateStatus(
         status,
-        { id: latest.id, version: latest.version, status: "running", index: latest.index, error: undefined },
+        { id: latest.id, version: latest.version, status: "running", index: latest.index, runId: latestRunId, error: undefined },
         latest
       );
 
-      const taskLabel = `id=${latest.id}, index=${latest.index}`;
+      const taskLabel = `id=${latest.id}, runId=${latestRunId}`;
       try {
         console.log(
           `[${new Date().toISOString()}] Prompt-driven flow: runExtensionAgent (${taskLabel}, timeout=${taskTimeoutMs}ms)`
@@ -948,7 +1019,7 @@ async function main() {
         status = loadStatus();
         updateStatus(
           status,
-          { id: latest.id, version: latest.version, status: "complete", index: latest.index, error: undefined },
+          { id: latest.id, version: latest.version, status: "complete", index: latest.index, runId: latestRunId, error: undefined },
           latest
         );
         console.log(`[${new Date().toISOString()}] Completed task: ${taskLabel}`);
@@ -958,7 +1029,7 @@ async function main() {
         status = loadStatus();
         updateStatus(
           status,
-          { id: latest.id, version: latest.version, status: "error", index: latest.index, error: errorMessage },
+          { id: latest.id, version: latest.version, status: "error", index: latest.index, runId: latestRunId, error: errorMessage },
           latest
         );
         if (isTimeout) {
@@ -974,7 +1045,7 @@ async function main() {
     }
   }
 
-  const watchedQueuePaths = [SAMPLES_INCOMING_QUEUE_PATH, PROCESSINGS_INCOMING_QUEUE_PATH, LEGACY_EXT_LIST_PATH]
+  const watchedQueuePaths = [AGENT_INCOMING_QUEUE_PATH, SAMPLES_INCOMING_QUEUE_PATH, PROCESSINGS_INCOMING_QUEUE_PATH, LEGACY_EXT_LIST_PATH]
     .filter((p) => existsSync(p));
   const uniquePaths = [...new Set(watchedQueuePaths)];
   const watchers = uniquePaths.map((queuePath) =>

@@ -30,22 +30,23 @@ npm run dev
 | Path | Purpose |
 |---|---|
 | `index.ts` | Main prompt-driven processing service entry |
-| `samples/incoming_queue.json` | Primary queue source (兼容 `processings/incoming_queue.json`) |
-| `samples/status.json` | Primary processing state (兼容 `processings/status.json`) |
+| `$AGENT_QUEUE_ROOT/incoming_queue.json` | Primary queue source (defaults to `$EXTENSION_STORAGE_ROOT/agent-queue/incoming_queue.json`; legacy `samples/` paths are still read when present) |
+| `$AGENT_QUEUE_ROOT/status.json` | Primary processing state |
 | `config/pi-agent.config.json` | AI provider configuration (model, API key, base URL) |
-| `samples/<extensionId>/<version>/` | Unpacked extension exact version directory |
-| `samples/<extensionId>/cli_config.json` | Runtime config (兼容 `cli.config.json`) |
-| `samples/<extensionId>/prompt.md` | Runtime prompt file |
-| `samples/<extensionId>/ai_testing/<index>/` | Agent execution artifacts (`recordings.json` and screenshots) |
+| `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<extensionId>/<version>/` | Unpacked extension exact version directory |
+| `<artifactRoot>/cli_config.json` | Runtime config (兼容 `cli.config.json`; legacy `samples/<extensionId>/` fallback is supported) |
+| `<artifactRoot>/prompt.md` | Runtime prompt file (legacy `samples/<extensionId>/` fallback is supported) |
+| `<artifactRoot>/ai_testing/<runId>/` | Agent execution artifacts (`recordings.json` and screenshots) |
 | `scripts/enqueue-task.ts` | Simulate external system queue push |
 
 ### Queue and Status Fields
 
-- `samples/incoming_queue.json`（兼容 `processings/incoming_queue.json`）
+- `$AGENT_QUEUE_ROOT/incoming_queue.json`
   - `incoming_time`: queue entry creation time in ISO 8601 format
-- `samples/status.json`（兼容 `processings/status.json`）
+- `$AGENT_QUEUE_ROOT/status.json`
   - `status_time`: last status update time in ISO 8601 format
   - `duration`: elapsed seconds from `incoming_time` to current status update
+  - `runId`: stable output folder name under `ai_testing/<runId>/`
 
 ---
 
@@ -56,13 +57,13 @@ npm run dev
 1. 仅在服务 `idle` 时才会从 `incoming_queue.json` 取任务。
 2. 每次只取队列中“最新一条”（按 `incoming_time`，同时间按 `index`）。
 3. 处理时会校验扩展固定结构：
-   - `samples/<id>/<version>/` 必须存在
-   - `samples/<id>/cli_config.json`（兼容 `cli.config.json`）必须存在
-   - `samples/<id>/prompt.md` 必须存在
+   - `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<id>/<version>/` 必须存在
+   - `<artifactRoot>/cli_config.json`（兼容 `cli.config.json`）必须存在
+   - `<artifactRoot>/prompt.md` 必须存在
 4. 调用 `runExtensionAgent` 读取 `prompt.md`，由 prompt 驱动 Agent 调用 `playwright-cli` 等工具执行真实流程。
-   - 对 `playwright-cli open` 增加“浏览器会话保护”最小策略：**每次 open 前默认执行一次 `playwright-cli close-all`**（可通过 `BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN=0` 关闭）；优先复用命令里已有 `--profile`（并在启动前清理常见 Chromium 锁文件 `SingletonLock` 等）；若命令未带 `--profile`，则自动追加 `--persistent` 并隔离到 `samples/<id>/ai_testing/<index>/.playwright-profile`，降低 `Browser is already in use` 链式失败概率。
+   - 对 `playwright-cli open` 增加“浏览器会话保护”最小策略：**每次 open 前默认执行一次 `playwright-cli close-all`**（可通过 `BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN=0` 关闭）；优先复用命令里已有 `--profile`（并在启动前清理常见 Chromium 锁文件 `SingletonLock` 等）；若命令未带 `--profile`，则自动追加 `--persistent` 并隔离到 `<artifactRoot>/ai_testing/<runId>/.playwright-profile`，降低 `Browser is already in use` 链式失败概率。
    - 启动日志会打印 `[browser-guard]`，用于观察 close-all / 锁清理 / 隔离目录是否生效。
-5. 运行过程中通过 `record_step` 工具向 `samples/<id>/ai_testing/<index>/recordings.json` 持续写入步骤，并保存对应截图。
+5. 运行过程中通过 `record_step` 工具向 `<artifactRoot>/ai_testing/<runId>/recordings.json` 持续写入步骤，并保存对应截图。
 6. 完成或失败后，`status.json` 会更新：
    - `status` (`running` / `complete` / `error`)
    - `status_time`（当前时间）
@@ -97,7 +98,7 @@ npm run enqueue:task
 npm run enqueue:task -- --id nkbihfbeogaeaoehlefnkodbefgpgknn --name MetaMask --version 12.17.3_0 --index 1001
 ```
 
-脚本会优先写入 `samples/incoming_queue.json`，兼容 `processings/incoming_queue.json`。
+脚本会写入 `$AGENT_QUEUE_ROOT/incoming_queue.json`；未设置时默认写入 `$EXTENSION_STORAGE_ROOT/agent-queue/incoming_queue.json`。
 
 ---
 

@@ -1,14 +1,26 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 type QueueEntry = {
   id: string;
-  name: string;
+  name?: string;
   version: string;
   index: number;
+  runId: string;
+  artifactRoot: string;
+  reason: string;
   incoming_time: string;
 };
 
+const storageRoot = process.env.EXTENSION_STORAGE_ROOT?.trim()
+  ? path.resolve(process.env.EXTENSION_STORAGE_ROOT.trim())
+  : os.tmpdir();
+const analyzerRoot = path.join(storageRoot, "chrome-extension-analyzer");
+const agentQueueRoot = process.env.AGENT_QUEUE_ROOT?.trim()
+  ? path.resolve(process.env.AGENT_QUEUE_ROOT.trim())
+  : path.join(storageRoot, "agent-queue");
+const AGENT_QUEUE_PATH = path.join(agentQueueRoot, "incoming_queue.json");
 const SAMPLES_QUEUE_PATH = path.resolve(process.cwd(), "samples", "incoming_queue.json");
 const PROCESSINGS_QUEUE_PATH = path.resolve(process.cwd(), "processings", "incoming_queue.json");
 
@@ -29,13 +41,16 @@ function saveQueue(filePath: string, entries: QueueEntry[]) {
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
-  writeFileSync(filePath, JSON.stringify(entries, null, 2));
+  const tmpPath = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+  writeFileSync(tmpPath, `${JSON.stringify(entries, null, 2)}\n`);
+  renameSync(tmpPath, filePath);
 }
 
 function resolveWritableQueuePaths(): string[] {
+  if (process.env.AGENT_QUEUE_ROOT || process.env.EXTENSION_STORAGE_ROOT) return [AGENT_QUEUE_PATH];
   if (existsSync(SAMPLES_QUEUE_PATH)) return [SAMPLES_QUEUE_PATH];
   if (existsSync(PROCESSINGS_QUEUE_PATH)) return [PROCESSINGS_QUEUE_PATH];
-  return [SAMPLES_QUEUE_PATH, PROCESSINGS_QUEUE_PATH];
+  return [AGENT_QUEUE_PATH];
 }
 
 function parseArgs() {
@@ -54,20 +69,26 @@ function parseArgs() {
   const version = getArg("version") ?? "12.17.3_0";
   const indexRaw = getArg("index");
   const index = indexRaw ? Number(indexRaw) : Date.now();
+  const runId = getArg("run-id") ?? `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${id.slice(0, 8)}`;
+  const artifactRoot = getArg("artifact-root") ?? path.join(analyzerRoot, id, version);
+  const reason = getArg("reason") ?? "manual_enqueue";
   if (!Number.isFinite(index)) {
     throw new Error(`Invalid --index value: ${indexRaw}`);
   }
 
-  return { id, name, version, index: Math.floor(index) };
+  return { id, name, version, index: Math.floor(index), runId, artifactRoot, reason };
 }
 
 function main() {
-  const { id, name, version, index } = parseArgs();
+  const { id, name, version, index, runId, artifactRoot, reason } = parseArgs();
   const entry: QueueEntry = {
     id,
     name,
     version,
     index,
+    runId,
+    artifactRoot,
+    reason,
     incoming_time: new Date().toISOString()
   };
 
@@ -79,7 +100,7 @@ function main() {
     console.log(`Appended queue entry to ${target}`);
   }
 
-  console.log(`Task queued: id=${id}, version=${version}, index=${index}`);
+  console.log(`Task queued: id=${id}, version=${version}, runId=${runId}`);
 }
 
 main();
