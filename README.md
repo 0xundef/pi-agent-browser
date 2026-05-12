@@ -60,6 +60,8 @@ npm run dev
    - `samples/<id>/cli_config.json`（兼容 `cli.config.json`）必须存在
    - `samples/<id>/prompt.md` 必须存在
 4. 调用 `runExtensionAgent` 读取 `prompt.md`，由 prompt 驱动 Agent 调用 `playwright-cli` 等工具执行真实流程。
+   - 对 `playwright-cli open` 增加“浏览器会话保护”最小策略：**每次 open 前默认执行一次 `playwright-cli close-all`**（可通过 `BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN=0` 关闭）；优先复用命令里已有 `--profile`（并在启动前清理常见 Chromium 锁文件 `SingletonLock` 等）；若命令未带 `--profile`，则自动追加 `--persistent` 并隔离到 `samples/<id>/ai_testing/<index>/.playwright-profile`，降低 `Browser is already in use` 链式失败概率。
+   - 启动日志会打印 `[browser-guard]`，用于观察 close-all / 锁清理 / 隔离目录是否生效。
 5. 运行过程中通过 `record_step` 工具向 `samples/<id>/ai_testing/<index>/recordings.json` 持续写入步骤，并保存对应截图。
 6. 完成或失败后，`status.json` 会更新：
    - `status` (`running` / `complete` / `error`)

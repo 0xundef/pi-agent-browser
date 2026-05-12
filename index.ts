@@ -1,6 +1,6 @@
 import { Agent, type AgentEvent, type AgentTool } from "@mariozechner/pi-agent-core";
 import { Type, getEnvApiKey, getModels, type KnownProvider, type Model, type Static } from "@mariozechner/pi-ai";
-import { existsSync, mkdirSync, readFileSync, watch, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import * as bip39 from "bip39";
@@ -529,7 +529,91 @@ function ensureExtensionFiles(queueEntry: QueueEntryWithIncomingTime) {
   };
 }
 
-function createExtensionShellCommandTool(extDir: string): AgentTool<typeof shellCommandParameters, any> {
+const PROFILE_LOCK_FILES = ["SingletonLock", "SingletonCookie", "SingletonSocket", "DevToolsActivePort"];
+
+function stripShellQuotes(value: string): string {
+  if (
+    (value.startsWith("\"") && value.endsWith("\"")) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function parsePlaywrightProfileArg(command: string): string | undefined {
+  const profileMatch = command.match(/--profile(?:=|\s+)(?:"[^"]*"|'[^']*'|\S+)/);
+  if (!profileMatch) return undefined;
+  const raw = profileMatch[0].replace(/^--profile(?:=|\s+)/, "").trim();
+  if (!raw) return undefined;
+  return stripShellQuotes(raw);
+}
+
+function cleanupProfileLocks(profileDir: string): void {
+  for (const lockName of PROFILE_LOCK_FILES) {
+    const lockPath = path.join(profileDir, lockName);
+    if (existsSync(lockPath)) {
+      rmSync(lockPath, { recursive: true, force: true });
+      console.log(`[${new Date().toISOString()}] [browser-guard] removed stale profile lock: ${lockPath}`);
+    }
+  }
+}
+
+/** Default on: set BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN=0 to skip closing playwright-cli sessions before open. */
+function browserGuardCloseAllBeforeOpen(): boolean {
+  const v = process.env.BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN;
+  if (v === undefined || v === "") return true;
+  return !/^0|false|no|off$/i.test(v.trim());
+}
+
+/** Release playwright-cli managed browsers before a new open, reduces \"Browser is already in use\". Non-fatal on failure. */
+function maybeClosePlaywrightCliSessionsBeforeOpen(extDir: string): void {
+  if (!browserGuardCloseAllBeforeOpen()) {
+    console.log(`[${new Date().toISOString()}] [browser-guard] skip close-all (BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN=off)`);
+    return;
+  }
+  try {
+    execSync("playwright-cli close-all", {
+      cwd: extDir,
+      encoding: "utf8",
+      stdio: "pipe",
+      maxBuffer: 1024 * 1024,
+      timeout: 20_000
+    });
+    console.log(`[${new Date().toISOString()}] [browser-guard] playwright-cli close-all completed`);
+  } catch (e: any) {
+    const hint = String(e?.stderr ?? e?.stdout ?? e?.message ?? e ?? "").slice(0, 240);
+    console.log(`[${new Date().toISOString()}] [browser-guard] playwright-cli close-all non-fatal: ${hint || "(no output)"}`);
+  }
+}
+
+function resolveProfileDirectory(profileArg: string, shellCwd: string): string {
+  return path.isAbsolute(profileArg) ? path.normalize(profileArg) : path.resolve(shellCwd, profileArg);
+}
+
+function applyPlaywrightOpenGuard(command: string, extDir: string, queueEntry: QueueEntry, shellCwd: string): string {
+  if (!/\bplaywright-cli\s+open\b/.test(command)) {
+    return command;
+  }
+
+  const profileArg = parsePlaywrightProfileArg(command);
+  if (profileArg) {
+    const profileDir = resolveProfileDirectory(profileArg, shellCwd);
+    cleanupProfileLocks(profileDir);
+    console.log(`[${new Date().toISOString()}] [browser-guard] using existing profile: ${profileDir}`);
+    return command;
+  }
+
+  const isolatedProfileDir = path.join(extDir, "ai_testing", String(queueEntry.index), ".playwright-profile");
+  mkdirSync(isolatedProfileDir, { recursive: true });
+  cleanupProfileLocks(isolatedProfileDir);
+  console.log(
+    `[${new Date().toISOString()}] [browser-guard] isolated profile enabled: ${isolatedProfileDir} (id=${queueEntry.id}, index=${queueEntry.index})`
+  );
+  return `${command} --persistent --profile=${JSON.stringify(isolatedProfileDir)}`;
+}
+
+function createExtensionShellCommandTool(extDir: string, queueEntry: QueueEntry): AgentTool<typeof shellCommandParameters, any> {
   return {
     name: "shell_command",
     label: "Execute shell command",
@@ -537,8 +621,13 @@ function createExtensionShellCommandTool(extDir: string): AgentTool<typeof shell
     parameters: shellCommandParameters,
     async execute(_toolCallId: string, params: ShellCommandParameters) {
       try {
-        const result = execSync(params.command, {
-          cwd: params.cwd ? path.resolve(extDir, params.cwd) : extDir,
+        const shellCwd = params.cwd ? path.resolve(extDir, params.cwd) : extDir;
+        if (/\bplaywright-cli\s+open\b/.test(params.command)) {
+          maybeClosePlaywrightCliSessionsBeforeOpen(extDir);
+        }
+        const guardedCommand = applyPlaywrightOpenGuard(params.command, extDir, queueEntry, shellCwd);
+        const result = execSync(guardedCommand, {
+          cwd: shellCwd,
           encoding: "utf8",
           maxBuffer: 1024 * 1024 * 10
         });
@@ -665,7 +754,7 @@ async function runExtensionAgent(queueEntry: QueueEntry, runtime: RuntimeConfig)
       tools: [
         getTimeTool,
         addTool,
-        createExtensionShellCommandTool(extDir),
+        createExtensionShellCommandTool(extDir, queueEntry),
         generateMnemonicTool,
         createExtensionValidateTool(extDir, queueEntry.index),
         createExtensionRecordStepTool(extDir, queueEntry.index)
