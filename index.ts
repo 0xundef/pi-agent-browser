@@ -846,6 +846,32 @@ function resolveTaskTimeoutMs(): number {
   return Math.floor(parsed);
 }
 
+type DevCliOptions = {
+  /** When set, only queue entries with this extension `id` are considered. */
+  extensionIdFilter?: string;
+};
+
+/** Parses args after `node` / script, e.g. `npm run dev -- --eid nkbihfbeogaeaoehlefnkodbefgpgknn`. */
+function parseDevCliOptions(argv: string[]): DevCliOptions {
+  let extensionIdFilter: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--eid" || a === "-eid") {
+      const next = argv[i + 1];
+      if (next && !next.startsWith("-")) {
+        extensionIdFilter = next.trim();
+        i++;
+      }
+      continue;
+    }
+    if (a.startsWith("--eid=")) {
+      extensionIdFilter = a.slice("--eid=".length).trim();
+    }
+  }
+  if (extensionIdFilter === "") extensionIdFilter = undefined;
+  return extensionIdFilter ? { extensionIdFilter } : {};
+}
+
 async function runWithTimeout<T>(
   work: Promise<T>,
   timeoutMs: number,
@@ -871,6 +897,8 @@ async function main() {
   let isProcessing = false;
   const runtime = resolveRuntimeConfig(loadFileConfig());
   const taskTimeoutMs = resolveTaskTimeoutMs();
+  const devCli = parseDevCliOptions(process.argv.slice(2));
+  const eidFilter = devCli.extensionIdFilter;
 
   async function tryProcessLatest(reason: string) {
     if (isProcessing) {
@@ -880,9 +908,16 @@ async function main() {
     isProcessing = true;
     try {
       const queue = loadIncomingQueue();
-      const latest = pickLatestQueueEntry(queue);
+      const scopedQueue = eidFilter ? queue.filter((e) => e.id === eidFilter) : queue;
+      const latest = pickLatestQueueEntry(scopedQueue);
       if (!latest) {
-        console.log(`[${new Date().toISOString()}] Queue empty, idle (${reason}).`);
+        if (eidFilter && queue.length > 0) {
+          console.log(
+            `[${new Date().toISOString()}] No queue entry for eid=${eidFilter} (${queue.length} other entr${queue.length === 1 ? "y" : "ies"} skipped), idle (${reason}).`
+          );
+        } else {
+          console.log(`[${new Date().toISOString()}] Queue empty, idle (${reason}).`);
+        }
         return;
       }
 
@@ -968,8 +1003,9 @@ async function main() {
     process.exit(0);
   });
 
+  const eidNote = eidFilter ? ` Extension filter: eid=${eidFilter} (only this id from the queue).` : "";
   console.log(
-    `[${new Date().toISOString()}] Processing service started (prompt-driven agent + playwright-cli). Watching queue paths: ${uniquePaths.join(", ")}. Task hard timeout: ${taskTimeoutMs}ms (override via TASK_TIMEOUT_MS).`
+    `[${new Date().toISOString()}] Processing service started (prompt-driven agent + playwright-cli). Watching queue paths: ${uniquePaths.join(", ")}. Task hard timeout: ${taskTimeoutMs}ms (override via TASK_TIMEOUT_MS).${eidNote}`
   );
 }
 

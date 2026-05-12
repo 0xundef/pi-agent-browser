@@ -79,6 +79,12 @@ npm run dev
 npm run dev
 ```
 
+**Run only one extension (optional):** pass `--eid` so the service only picks queue rows whose `id` matches (other extensions in the queue are ignored until you restart without the flag).
+
+```bash
+npm run dev -- --eid nkbihfbeogaeaoehlefnkodbefgpgknn
+```
+
 ### Simulate External Queue Push
 
 新增独立脚本模拟外部系统入队（不会污染 `index.ts`）：
