@@ -1,0 +1,92 @@
+name: CI & Deploy browseragent
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "Git ref to deploy (commit SHA, branch, or tag). Leave empty to use main."
+        required: false
+        default: ""
+
+concurrency:
+  group: browseragent-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+  deploy:
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: self-hosted
+    steps:
+      - name: Deploy on server
+        shell: bash
+        env:
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          TARGET_REF: ${{ github.event.inputs.target_ref || 'main' }}
+          EXTENSION_STORAGE_ROOT: ${{ vars.EXTENSION_STORAGE_ROOT }}
+          AGENT_QUEUE_ROOT: ${{ vars.AGENT_QUEUE_ROOT }}
+          TASK_TIMEOUT_MS: ${{ vars.TASK_TIMEOUT_MS }}
+          BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN: ${{ vars.BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_AUTH_TOKEN: ${{ secrets.OPENAI_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DEPLOY_PATH:-}" ]; then
+            echo "Missing repository variable DEPLOY_PATH (clone directory on the self-hosted server, e.g. /home/lighthouse/pi-agent-browser)" >&2
+            exit 1
+          fi
+          cd "$DEPLOY_PATH"
+          git fetch origin --prune --tags "${TARGET_REF}"
+          if git cat-file -t "origin/${TARGET_REF}" 2>/dev/null | grep -q 'commit'; then
+            git checkout -f "${TARGET_REF}"
+            git reset --hard "origin/${TARGET_REF}"
+          else
+            git checkout -f "${TARGET_REF}"
+          fi
+
+          mkdir -p .logs
+          npm install --no-audit --no-fund
+          npm run build
+
+          # Chrome for Testing (used by Playwright); safe to re-run on each deploy
+          npx playwright install chromium
+
+          PM2_NAME="browseragent"
+          SUDO_PRESERVE_ENV="--preserve-env=EXTENSION_STORAGE_ROOT,AGENT_QUEUE_ROOT,TASK_TIMEOUT_MS,BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN,ANTHROPIC_API_KEY,ANTHROPIC_AUTH_TOKEN,OPENAI_API_KEY,OPENAI_AUTH_TOKEN"
+
+          if command -v pm2 >/dev/null 2>&1; then
+            sudo "$SUDO_PRESERVE_ENV" pm2 delete "$PM2_NAME" >/dev/null 2>&1 || true
+            sudo "$SUDO_PRESERVE_ENV" pm2 start npm --name "$PM2_NAME" -- run start
+            sudo "$SUDO_PRESERVE_ENV" pm2 save
+          else
+            pkill -f "node dist/index.js" >/dev/null 2>&1 || true
+            nohup env EXTENSION_STORAGE_ROOT="${EXTENSION_STORAGE_ROOT:-}" AGENT_QUEUE_ROOT="${AGENT_QUEUE_ROOT:-}" \
+              npm run start > .logs/browseragent-start.log 2>&1 &
+          fi
