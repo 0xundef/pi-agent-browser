@@ -607,6 +607,13 @@ function agentThinkingLogsEnabled(): boolean {
   return !/^0|false|no|off$/i.test(String(raw).trim());
 }
 
+/** Default off. Set `AGENT_DEBUG_QUEUE=1` to log when the poller skips a pick because a task is already running. */
+function agentQueueDebugLogsEnabled(): boolean {
+  const raw = process.env.AGENT_DEBUG_QUEUE;
+  if (raw === undefined || String(raw).trim() === "") return false;
+  return !/^0|false|no|off$/i.test(String(raw).trim());
+}
+
 /** Default cli_config matches known-good MetaMask setup: chromium, headless, userDataDir, no sandbox. */
 function buildDefaultCliConfigPayload(extensionUnpackAbs: string, sidecarRootAbs: string) {
   const abs = path.resolve(extensionUnpackAbs);
@@ -1080,7 +1087,9 @@ async function main() {
 
   async function tryProcessLatest() {
     if (isProcessing) {
-      console.log(`[${new Date().toISOString()}] Service busy, skip pick.`);
+      if (agentQueueDebugLogsEnabled()) {
+        console.log(`[${new Date().toISOString()}] Service busy, skip pick.`);
+      }
       return;
     }
     isProcessing = true;
