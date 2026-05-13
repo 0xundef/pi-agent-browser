@@ -118,6 +118,22 @@ function loadFileConfig(): FileConfig {
   };
 }
 
+function inferProviderFromEnvKeys(): KnownProvider | undefined {
+  const hasAnthropic = !!(
+    process.env.ANTHROPIC_AUTH_TOKEN ||
+    process.env.ANTHROPIC_API_KEY ||
+    process.env.ANTHROPIC_OAUTH_TOKEN
+  );
+  const hasOpenai = !!(
+    process.env.OPENAI_API_KEY ||
+    process.env.OPENAI_AUTH_TOKEN ||
+    process.env.OPENAI_OAUTH_TOKEN
+  );
+  if (hasAnthropic && !hasOpenai) return "anthropic";
+  if (hasOpenai && !hasAnthropic) return "openai";
+  return undefined;
+}
+
 function resolveRuntimeConfig(fileConfig: FileConfig): RuntimeConfig {
   const configuredProvider = fileConfig.provider ?? process.env.PI_PROVIDER;
   const providers = fileConfig.providers ?? [];
@@ -128,8 +144,14 @@ function resolveRuntimeConfig(fileConfig: FileConfig): RuntimeConfig {
     enabledProviders[0] ??
     providers[0];
 
-  const provider = ((selected?.provider ?? configuredProvider ?? "openai") as KnownProvider) ?? "openai";
-  const modelName = selected?.model ?? fileConfig.model ?? process.env.PI_MODEL ?? "gpt-4o-mini";
+  const provider =
+    ((selected?.provider ??
+      configuredProvider ??
+      inferProviderFromEnvKeys() ??
+      "openai") as KnownProvider) ?? "openai";
+  const rawModel = selected?.model ?? fileConfig.model ?? process.env.PI_MODEL;
+  const modelName =
+    rawModel ?? (provider === "anthropic" ? "claude-sonnet-4-20250514" : "gpt-4o-mini");
   const baseUrl = normalizedBaseUrl(
     selected?.baseUrl ??
       selected?.anthropicBaseUrl ??
