@@ -1018,9 +1018,9 @@ async function main() {
   const devCli = parseDevCliOptions(process.argv.slice(2));
   const eidFilter = devCli.extensionIdFilter;
 
-  async function tryProcessLatest(reason: string) {
+  async function tryProcessLatest() {
     if (isProcessing) {
-      console.log(`[${new Date().toISOString()}] Service busy, skip pick (${reason}).`);
+      console.log(`[${new Date().toISOString()}] Service busy, skip pick.`);
       return;
     }
     isProcessing = true;
@@ -1040,13 +1040,6 @@ async function main() {
       });
       const latest = pickLatestQueueEntry(unhandledQueue);
       if (!latest) {
-        if (eidFilter && queue.length > 0) {
-          console.log(
-            `[${new Date().toISOString()}] No unhandled queue entry for eid=${eidFilter} (${queue.length} total entr${queue.length === 1 ? "y" : "ies"}), idle (${reason}).`
-          );
-        } else {
-          console.log(`[${new Date().toISOString()}] Queue empty or already handled, idle (${reason}).`);
-        }
         return;
       }
 
@@ -1116,16 +1109,16 @@ async function main() {
     watch(queuePath, (eventType) => {
       if (eventType === "change") {
         console.log(`[${new Date().toISOString()}] Queue changed: ${queuePath}`);
-        tryProcessLatest(`watch:${path.basename(queuePath)}`).catch((e) => {
+        tryProcessLatest().catch((e) => {
           console.error(`[${new Date().toISOString()}] tryProcessLatest error: ${e?.message ?? String(e)}`);
         });
       }
     })
   );
 
-  await tryProcessLatest("startup");
+  await tryProcessLatest();
   const pollTimer = setInterval(() => {
-    tryProcessLatest("polling").catch((e) => {
+    tryProcessLatest().catch((e) => {
       console.error(`[${new Date().toISOString()}] Polling error: ${e?.message ?? String(e)}`);
     });
   }, 3000);
