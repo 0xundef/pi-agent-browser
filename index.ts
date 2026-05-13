@@ -1,6 +1,15 @@
 import { Agent, type AgentEvent, type AgentTool } from "@mariozechner/pi-agent-core";
 import { Type, getEnvApiKey, getModels, type KnownProvider, type Model, type Static } from "@mariozechner/pi-ai";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, watch, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  watch,
+  writeFileSync
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
@@ -389,6 +398,15 @@ const AGENT_QUEUE_ROOT = process.env.AGENT_QUEUE_ROOT?.trim()
   : path.join(extensionStorageRoot, AGENT_QUEUE_DIR);
 const AGENT_INCOMING_QUEUE_PATH = path.join(AGENT_QUEUE_ROOT, "incoming_queue.json");
 const AGENT_STATUS_PATH = path.join(AGENT_QUEUE_ROOT, "status.json");
+const AGENT_DEFAULT_PROMPT_PATH = path.join(AGENT_QUEUE_ROOT, "prompt.md");
+
+function syncAgentQueueDefaultPromptFromBundled(): void {
+  if (existsSync(AGENT_DEFAULT_PROMPT_PATH)) return;
+  const src = path.join(process.cwd(), "resources", "default-extension-test-prompt.md");
+  if (!existsSync(src)) return;
+  mkdirSync(path.dirname(AGENT_DEFAULT_PROMPT_PATH), { recursive: true });
+  copyFileSync(src, AGENT_DEFAULT_PROMPT_PATH);
+}
 
 type QueueEntry = {
   id: string;
@@ -529,19 +547,17 @@ function resolveCliConfigPath(extensionRootDir: string): string | undefined {
   return undefined;
 }
 
-/** One prompt per extension: sibling of `<version>/` → `<id>/prompt.md`. Legacy: `<id>/<version>/prompt.md`. */
-function resolveExtensionPromptPath(queueEntry: QueueEntry, versionDir: string): string {
-  const extensionScoped = path.join(path.dirname(versionDir), "prompt.md");
-  const legacyVersionScoped = path.join(versionDir, "prompt.md");
-  const defaultStorageScoped = path.join(EXTENSION_ANALYZER_ROOT, queueEntry.id, "prompt.md");
-  if (existsSync(extensionScoped)) return extensionScoped;
-  if (existsSync(legacyVersionScoped)) return legacyVersionScoped;
-  if (existsSync(defaultStorageScoped) && extensionScoped !== defaultStorageScoped) {
-    return defaultStorageScoped;
-  }
+/**
+ * Prompt resolution: extension override first, then shared `$AGENT_QUEUE_ROOT/prompt.md`
+ * (seeded from `resources/default-extension-test-prompt.md` when missing).
+ */
+function resolveExtensionPromptPath(queueEntry: QueueEntry): string {
+  const extensionPrompt = path.join(EXTENSION_ANALYZER_ROOT, queueEntry.id, "prompt.md");
+  if (existsSync(extensionPrompt)) return extensionPrompt;
+  syncAgentQueueDefaultPromptFromBundled();
+  if (existsSync(AGENT_DEFAULT_PROMPT_PATH)) return AGENT_DEFAULT_PROMPT_PATH;
   throw new Error(
-    `prompt.md 不存在。按扩展共用一份：${extensionScoped}（首选）${extensionScoped !== defaultStorageScoped ? ` 或 ${defaultStorageScoped}` : ""}` +
-      `；旧布局可暂用：${legacyVersionScoped}`,
+    `prompt.md 不存在: 扩展 ${extensionPrompt} 或全局 ${AGENT_DEFAULT_PROMPT_PATH}（可由 OArmour 同步或放置 resources/default-extension-test-prompt.md 后重启）`,
   );
 }
 
@@ -550,7 +566,7 @@ function ensureExtensionFiles(queueEntry: QueueEntryWithIncomingTime) {
   if (!existsSync(artifactRootDir)) {
     throw new Error(`扩展目录不存在: ${artifactRootDir}`);
   }
-  const promptPath = resolveExtensionPromptPath(queueEntry, artifactRootDir);
+  const promptPath = resolveExtensionPromptPath(queueEntry);
   const cliConfigPath = resolveCliConfigPath(artifactRootDir);
 
   if (!cliConfigPath) {
