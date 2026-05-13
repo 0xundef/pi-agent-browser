@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { Agent, type AgentEvent, type AgentTool } from "@mariozechner/pi-agent-core";
 import { Type, getEnvApiKey, getModels, type KnownProvider, type Model, type Static } from "@mariozechner/pi-ai";
 import {
@@ -133,7 +134,8 @@ function resolveRuntimeConfig(fileConfig: FileConfig): RuntimeConfig {
       fileConfig.baseUrl ??
       fileConfig.anthropicBaseUrl ??
       fileConfig.openaiBaseUrl ??
-      process.env.ANTHROPIC_BASE_URL,
+      process.env.ANTHROPIC_BASE_URL ??
+      process.env.OPENAI_BASE_URL,
   );
   const apiKey =
     selected?.apiKey ??
@@ -146,6 +148,7 @@ function resolveRuntimeConfig(fileConfig: FileConfig): RuntimeConfig {
   const systemPrompt =
     selected?.systemPrompt ??
     fileConfig.systemPrompt ??
+    (process.env.PI_SYSTEM_PROMPT?.trim() || undefined) ??
     "You are a helpful assistant. Use tools when they are useful.";
   return { provider, modelName, apiKey, baseUrl, systemPrompt };
 }

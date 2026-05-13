@@ -20,8 +20,9 @@ npm install
 npx playwright install chromium
 
 # 3. Configure your AI provider
-#    Edit config/pi-agent.config.json with your API key, or set env vars:
-#    ANTHROPIC_AUTH_TOKEN=xxx npm run dev
+cp .env.example .env
+# Edit .env (ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY, PI_PROVIDER, PI_MODEL, optional ANTHROPIC_BASE_URL).
+# Or use JSON: config/pi-agent.config.json — or export vars in the shell (dotenv does not override existing env).
 npm run dev
 ```
 
@@ -32,7 +33,8 @@ npm run dev
 | `index.ts` | Main prompt-driven processing service entry |
 | `$AGENT_QUEUE_ROOT/incoming_queue.json` | Queue source (defaults to `$EXTENSION_STORAGE_ROOT/agent-queue/incoming_queue.json`) |
 | `$AGENT_QUEUE_ROOT/status.json` | Primary processing state |
-| `config/pi-agent.config.json` | AI provider configuration (model, API key, base URL) |
+| `.env` (from `.env.example`) | AI provider credentials and model (`PI_*`, `ANTHROPIC_*`, `OPENAI_*`); loaded via `dotenv` |
+| `config/pi-agent.config.json` | Optional JSON provider config (same shape as before); use `PI_CONFIG` to point elsewhere |
 | `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<extensionId>/<version>/` | Unpacked extension exact version directory |
 | `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<extensionId>/prompt.md` | Optional **per-extension** prompt (overrides global) |
 | `$AGENT_QUEUE_ROOT/prompt.md` | **Default prompt** for all extensions; OArmour seeds this from its bundled template on enqueue; locally, `resources/default-extension-test-prompt.md` is copied here if missing |
