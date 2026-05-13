@@ -30,12 +30,12 @@ npm run dev
 | Path | Purpose |
 |---|---|
 | `index.ts` | Main prompt-driven processing service entry |
-| `$AGENT_QUEUE_ROOT/incoming_queue.json` | Primary queue source (defaults to `$EXTENSION_STORAGE_ROOT/agent-queue/incoming_queue.json`; legacy `samples/` paths are still read when present) |
+| `$AGENT_QUEUE_ROOT/incoming_queue.json` | Queue source (defaults to `$EXTENSION_STORAGE_ROOT/agent-queue/incoming_queue.json`) |
 | `$AGENT_QUEUE_ROOT/status.json` | Primary processing state |
 | `config/pi-agent.config.json` | AI provider configuration (model, API key, base URL) |
 | `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<extensionId>/<version>/` | Unpacked extension exact version directory |
-| `<artifactRoot>/cli_config.json` | Runtime config (兼容 `cli.config.json`; legacy `samples/<extensionId>/` fallback is supported) |
-| `<artifactRoot>/prompt.md` | Runtime prompt file (legacy `samples/<extensionId>/` fallback is supported) |
+| `<artifactRoot>/cli_config.json` | Runtime config (兼容 `cli.config.json`) |
+| `<artifactRoot>/prompt.md` | Runtime prompt file |
 | `<artifactRoot>/ai_testing/<runId>/` | Agent execution artifacts (`recordings.json` and screenshots) |
 | `scripts/enqueue-task.ts` | Simulate external system queue push |
 
@@ -147,7 +147,7 @@ The default prompt in `index.ts` pointed to `.playwright/cli.config.json` using 
 |---|---|---|
 | 1 | **Config file rename** | Renamed `pi-agent.config.json` to `config.json`; updated `loadFileConfig()` in [index.ts](file:///Volumes/T7/repos/pi-agent-browser/index.ts#L73-L77) to check both names. |
 | 2 | **Missing `bip39` dependency** | Added `bip39` + `@types/bip39` to `package.json`; ran `npm install`. |
-| 3 | **Extension unpacking** | Extracted `metamask.crx` to `samples/metamask/` (stripped CRX header to get ZIP, then unzipped). |
+| 3 | **Extension unpacking** | Extracted `metamask.crx` to the shared artifact root (stripped CRX header to get ZIP, then unzipped). |
 | 4 | **Chrome crash on launch** | Added `--no-sandbox` and `--disable-gpu` to `.playwright/cli.config.json` launch args. |
 | 5 | **Persistent profile required** | Launch command now uses `--persistent --profile=/Volumes/T7/repos/pi-agent-browser/.playwright/profile`. |
 | 6 | **CFT binaries missing** | Ran `npx playwright install chromium` to download Chrome for Testing. |

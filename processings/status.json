@@ -2,9 +2,12 @@
   {
     "id": "nkbihfbeogaeaoehlefnkodbefgpgknn",
     "version": "13.28.0",
-    "status": "complete",
+    "status": "error",
     "index": 30004,
-    "status_time": "2026-05-12T09:27:03.481Z",
-    "duration": 255766
+    "status_time": "2026-05-12T10:45:40.815Z",
+    "duration": 260483,
+    "runId": "30004",
+    "recordingsPath": "/var/folders/jl/11707gx55tq8kt07lp2g6k340000gn/T/chrome-extension-analyzer/nkbihfbeogaeaoehlefnkodbefgpgknn/13.28.0/ai_testing/30004/recordings.json",
+    "error": "扩展目录不存在: /var/folders/jl/11707gx55tq8kt07lp2g6k340000gn/T/chrome-extension-analyzer/nkbihfbeogaeaoehlefnkodbefgpgknn/13.28.0"
   }
 ]

@@ -21,8 +21,6 @@ const agentQueueRoot = process.env.AGENT_QUEUE_ROOT?.trim()
   ? path.resolve(process.env.AGENT_QUEUE_ROOT.trim())
   : path.join(storageRoot, "agent-queue");
 const AGENT_QUEUE_PATH = path.join(agentQueueRoot, "incoming_queue.json");
-const SAMPLES_QUEUE_PATH = path.resolve(process.cwd(), "samples", "incoming_queue.json");
-const PROCESSINGS_QUEUE_PATH = path.resolve(process.cwd(), "processings", "incoming_queue.json");
 
 function loadQueue(filePath: string): QueueEntry[] {
   if (!existsSync(filePath)) return [];
@@ -47,9 +45,6 @@ function saveQueue(filePath: string, entries: QueueEntry[]) {
 }
 
 function resolveWritableQueuePaths(): string[] {
-  if (process.env.AGENT_QUEUE_ROOT || process.env.EXTENSION_STORAGE_ROOT) return [AGENT_QUEUE_PATH];
-  if (existsSync(SAMPLES_QUEUE_PATH)) return [SAMPLES_QUEUE_PATH];
-  if (existsSync(PROCESSINGS_QUEUE_PATH)) return [PROCESSINGS_QUEUE_PATH];
   return [AGENT_QUEUE_PATH];
 }
 

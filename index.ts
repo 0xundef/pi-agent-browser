@@ -378,8 +378,6 @@ const validateRecordingsTool: AgentTool<typeof validateRecordingsParameters, { v
 
 // ==================== Extension Management ====================
 
-const SAMPLES_DIR = path.resolve(process.cwd(), "samples");
-const PROCESSINGS_DIR = path.resolve(process.cwd(), "processings");
 const EXTENSION_ANALYZER_DIR = "chrome-extension-analyzer";
 const AGENT_QUEUE_DIR = "agent-queue";
 const extensionStorageRoot = process.env.EXTENSION_STORAGE_ROOT?.trim()
@@ -391,11 +389,6 @@ const AGENT_QUEUE_ROOT = process.env.AGENT_QUEUE_ROOT?.trim()
   : path.join(extensionStorageRoot, AGENT_QUEUE_DIR);
 const AGENT_INCOMING_QUEUE_PATH = path.join(AGENT_QUEUE_ROOT, "incoming_queue.json");
 const AGENT_STATUS_PATH = path.join(AGENT_QUEUE_ROOT, "status.json");
-const SAMPLES_INCOMING_QUEUE_PATH = path.join(SAMPLES_DIR, "incoming_queue.json");
-const PROCESSINGS_INCOMING_QUEUE_PATH = path.join(PROCESSINGS_DIR, "incoming_queue.json");
-const LEGACY_EXT_LIST_PATH = path.join(SAMPLES_DIR, "ext_list.json");
-const SAMPLES_STATUS_PATH = path.join(SAMPLES_DIR, "status.json");
-const PROCESSINGS_STATUS_PATH = path.join(PROCESSINGS_DIR, "status.json");
 
 type QueueEntry = {
   id: string;
@@ -437,36 +430,15 @@ function saveJson(filePath: string, data: unknown) {
 }
 
 function loadIncomingQueue(): QueueEntryWithIncomingTime[] {
-  if (existsSync(AGENT_INCOMING_QUEUE_PATH)) {
-    return loadJson(AGENT_INCOMING_QUEUE_PATH, []);
-  }
-  if (existsSync(SAMPLES_INCOMING_QUEUE_PATH)) {
-    return loadJson(SAMPLES_INCOMING_QUEUE_PATH, []);
-  }
-  if (existsSync(PROCESSINGS_INCOMING_QUEUE_PATH)) {
-    return loadJson(PROCESSINGS_INCOMING_QUEUE_PATH, []);
-  }
-  // Backward compatibility when old filename is still present.
-  return loadJson(LEGACY_EXT_LIST_PATH, []);
+  return loadJson(AGENT_INCOMING_QUEUE_PATH, []);
 }
 
 function loadStatus(): StatusEntry[] {
-  if (existsSync(AGENT_STATUS_PATH)) {
-    return loadJson(AGENT_STATUS_PATH, []);
-  }
-  if (existsSync(SAMPLES_STATUS_PATH)) {
-    return loadJson(SAMPLES_STATUS_PATH, []);
-  }
-  if (existsSync(PROCESSINGS_STATUS_PATH)) {
-    return loadJson(PROCESSINGS_STATUS_PATH, []);
-  }
-  return [];
+  return loadJson(AGENT_STATUS_PATH, []);
 }
 
 function saveStatus(status: StatusEntry[]) {
   const writablePaths = [AGENT_STATUS_PATH];
-  if (existsSync(SAMPLES_STATUS_PATH)) writablePaths.push(SAMPLES_STATUS_PATH);
-  if (existsSync(PROCESSINGS_STATUS_PATH)) writablePaths.push(PROCESSINGS_STATUS_PATH);
   for (const filePath of writablePaths) {
     saveJson(filePath, status);
   }
@@ -559,18 +531,14 @@ function resolveCliConfigPath(extensionRootDir: string): string | undefined {
 
 function ensureExtensionFiles(queueEntry: QueueEntryWithIncomingTime) {
   const artifactRootDir = resolveExtensionArtifactRoot(queueEntry);
-  const legacyExtensionRootDir = path.join(SAMPLES_DIR, queueEntry.id);
-  const promptPath = [
-    path.join(artifactRootDir, "prompt.md"),
-    path.join(legacyExtensionRootDir, "prompt.md")
-  ].find((candidate) => existsSync(candidate));
-  const cliConfigPath = resolveCliConfigPath(artifactRootDir) ?? resolveCliConfigPath(legacyExtensionRootDir);
+  const promptPath = path.join(artifactRootDir, "prompt.md");
+  const cliConfigPath = resolveCliConfigPath(artifactRootDir);
 
   if (!existsSync(artifactRootDir)) {
     throw new Error(`扩展目录不存在: ${artifactRootDir}`);
   }
-  if (!promptPath) {
-    throw new Error(`prompt.md 不存在: ${artifactRootDir}（或兼容目录 ${legacyExtensionRootDir}）`);
+  if (!existsSync(promptPath)) {
+    throw new Error(`prompt.md 不存在: ${promptPath}`);
   }
   if (!cliConfigPath) {
     throw new Error(`cli_config.json 不存在（兼容 cli.config.json）: ${artifactRootDir}`);
@@ -579,7 +547,7 @@ function ensureExtensionFiles(queueEntry: QueueEntryWithIncomingTime) {
   return {
     extensionRootDir: artifactRootDir,
     versionDir: artifactRootDir,
-    promptPath: promptPath!,
+    promptPath,
     cliConfigPath
   };
 }
@@ -1045,9 +1013,11 @@ async function main() {
     }
   }
 
-  const watchedQueuePaths = [AGENT_INCOMING_QUEUE_PATH, SAMPLES_INCOMING_QUEUE_PATH, PROCESSINGS_INCOMING_QUEUE_PATH, LEGACY_EXT_LIST_PATH]
-    .filter((p) => existsSync(p));
-  const uniquePaths = [...new Set(watchedQueuePaths)];
+  const queueDir = path.dirname(AGENT_INCOMING_QUEUE_PATH);
+  if (!existsSync(queueDir)) {
+    mkdirSync(queueDir, { recursive: true });
+  }
+  const uniquePaths = existsSync(AGENT_INCOMING_QUEUE_PATH) ? [AGENT_INCOMING_QUEUE_PATH] : [];
   const watchers = uniquePaths.map((queuePath) =>
     watch(queuePath, (eventType) => {
       if (eventType === "change") {

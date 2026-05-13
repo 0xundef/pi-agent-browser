@@ -1,6 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 type QueueItem = {
   id: string;
@@ -15,13 +15,14 @@ type StatusItem = {
   index?: number;
 };
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const samplesDir = path.join(__dirname, "samples");
-const processingsDir = path.join(__dirname, "processings");
-const incomingQueuePath = path.join(processingsDir, "incoming_queue.json");
-const legacyQueuePath = path.join(samplesDir, "ext_list.json");
-const statusPath = path.join(processingsDir, "status.json");
+const storageRoot = process.env.EXTENSION_STORAGE_ROOT?.trim()
+  ? path.resolve(process.env.EXTENSION_STORAGE_ROOT.trim())
+  : os.tmpdir();
+const agentQueueRoot = process.env.AGENT_QUEUE_ROOT?.trim()
+  ? path.resolve(process.env.AGENT_QUEUE_ROOT.trim())
+  : path.join(storageRoot, "agent-queue");
+const incomingQueuePath = path.join(agentQueueRoot, "incoming_queue.json");
+const statusPath = path.join(agentQueueRoot, "status.json");
 
 function buildKey(id: string, version: string): string {
   return `${id}@@${version}`;
@@ -42,12 +43,7 @@ function parseArgs() {
 }
 
 async function main() {
-  let queueRaw: string;
-  try {
-    queueRaw = await readFile(incomingQueuePath, "utf8");
-  } catch {
-    queueRaw = await readFile(legacyQueuePath, "utf8");
-  }
+  const queueRaw = await readFile(incomingQueuePath, "utf8");
   const statusRaw = await readFile(statusPath, "utf8");
 
   const incomingQueue = JSON.parse(queueRaw) as QueueItem[];
@@ -90,7 +86,7 @@ async function main() {
 
   if (targetIndex === -1) {
     if (args.id || args.version) {
-      console.log("No matching target found in processings/status.json for provided --id and --version.");
+      console.log("No matching target found in agent queue status.json for provided --id and --version.");
     } else {
       console.log("All status records are already synced. No update needed.");
     }
@@ -98,7 +94,7 @@ async function main() {
   }
 
   if (targetMatchedIndex === undefined) {
-    console.log("Target found, but no index mapping exists in processings/incoming_queue.json.");
+    console.log("Target found, but no index mapping exists in agent queue incoming_queue.json.");
     return;
   }
 
@@ -112,7 +108,7 @@ async function main() {
 
   await writeFile(statusPath, `${JSON.stringify(nextStatus, null, 2)}\n`, "utf8");
 
-  console.log("Done. Updated exactly 1 record in processings/status.json");
+  console.log("Done. Updated exactly 1 record in agent queue status.json");
   console.log(
     `Target: id=${target.id}, version=${target.version}, oldIndex=${String(previousIndex)}, newIndex=${targetMatchedIndex}`
   );
