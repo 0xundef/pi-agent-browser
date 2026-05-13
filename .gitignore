@@ -35,4 +35,3 @@ config.json
 config/pi-agent.config.json
 samples/
 processings/
-.env.local

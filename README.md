@@ -21,8 +21,9 @@ npx playwright install chromium
 
 # 3. Configure your AI provider
 cp .env.example .env
-# Edit .env (ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY, PI_PROVIDER, PI_MODEL, optional ANTHROPIC_BASE_URL).
+# Edit `.env` or `.env.local` (ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY, PI_PROVIDER, PI_MODEL, optional ANTHROPIC_BASE_URL).
 # Or use JSON: config/pi-agent.config.json — or export vars in the shell (dotenv does not override existing env).
+# Deploy: put API keys in GitHub **Secrets**; use **Variables** only for non-sensitive values (see `.github/workflows/ci.yml`).
 npm run dev
 ```
 

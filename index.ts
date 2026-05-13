@@ -1,4 +1,4 @@
-import "dotenv/config";
+import dotenv from "dotenv";
 import { Agent, type AgentEvent, type AgentTool } from "@mariozechner/pi-agent-core";
 import { Type, getEnvApiKey, getModels, type KnownProvider, type Model, type Static } from "@mariozechner/pi-ai";
 import {
@@ -15,6 +15,9 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import * as bip39 from "bip39";
+
+dotenv.config();
+dotenv.config({ path: path.resolve(process.cwd(), ".env.local") });
 
 type FileConfig = {
   provider?: string;

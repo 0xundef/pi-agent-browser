@@ -87,6 +87,14 @@ jobs:
             sudo "$SUDO_PRESERVE_ENV" pm2 save
           else
             pkill -f "node dist/index.js" >/dev/null 2>&1 || true
-            nohup env EXTENSION_STORAGE_ROOT="${EXTENSION_STORAGE_ROOT:-}" AGENT_QUEUE_ROOT="${AGENT_QUEUE_ROOT:-}" \
+            nohup env \
+              EXTENSION_STORAGE_ROOT="${EXTENSION_STORAGE_ROOT:-}" \
+              AGENT_QUEUE_ROOT="${AGENT_QUEUE_ROOT:-}" \
+              TASK_TIMEOUT_MS="${TASK_TIMEOUT_MS:-}" \
+              BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN="${BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN:-}" \
+              ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
+              ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-}" \
+              OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
+              OPENAI_AUTH_TOKEN="${OPENAI_AUTH_TOKEN:-}" \
               npm run start > .logs/browseragent-start.log 2>&1 &
           fi
