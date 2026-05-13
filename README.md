@@ -34,8 +34,9 @@ npm run dev
 | `$AGENT_QUEUE_ROOT/status.json` | Primary processing state |
 | `config/pi-agent.config.json` | AI provider configuration (model, API key, base URL) |
 | `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<extensionId>/<version>/` | Unpacked extension exact version directory |
+| `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<extensionId>/prompt.md` | **Runtime prompt file (one per extension, not per version)** |
 | `<artifactRoot>/cli_config.json` | Runtime config (兼容 `cli.config.json`) |
-| `<artifactRoot>/prompt.md` | Runtime prompt file |
+| `<artifactRoot>/prompt.md` | **Deprecated:** legacy prompt location inside the version folder (still accepted if sibling path missing) |
 | `<artifactRoot>/ai_testing/<runId>/` | Agent execution artifacts (`recordings.json` and screenshots) |
 | `scripts/enqueue-task.ts` | Simulate external system queue push |
 
@@ -59,7 +60,7 @@ npm run dev
 3. 处理时会校验扩展固定结构：
    - `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<id>/<version>/` 必须存在
    - `<artifactRoot>/cli_config.json`（兼容 `cli.config.json`）必须存在
-   - `<artifactRoot>/prompt.md` 必须存在
+   - `chrome-extension-analyzer/<id>/prompt.md` 必须存在（按扩展共用；若不存在则回退读取 `<artifactRoot>/prompt.md`）
 4. 调用 `runExtensionAgent` 读取 `prompt.md`，由 prompt 驱动 Agent 调用 `playwright-cli` 等工具执行真实流程。
    - 对 `playwright-cli open` 增加“浏览器会话保护”最小策略：**每次 open 前默认执行一次 `playwright-cli close-all`**（可通过 `BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN=0` 关闭）；优先复用命令里已有 `--profile`（并在启动前清理常见 Chromium 锁文件 `SingletonLock` 等）；若命令未带 `--profile`，则自动追加 `--persistent` 并隔离到 `<artifactRoot>/ai_testing/<runId>/.playwright-profile`，降低 `Browser is already in use` 链式失败概率。
    - 启动日志会打印 `[browser-guard]`，用于观察 close-all / 锁清理 / 隔离目录是否生效。

@@ -529,17 +529,30 @@ function resolveCliConfigPath(extensionRootDir: string): string | undefined {
   return undefined;
 }
 
+/** One prompt per extension: sibling of `<version>/` → `<id>/prompt.md`. Legacy: `<id>/<version>/prompt.md`. */
+function resolveExtensionPromptPath(queueEntry: QueueEntry, versionDir: string): string {
+  const extensionScoped = path.join(path.dirname(versionDir), "prompt.md");
+  const legacyVersionScoped = path.join(versionDir, "prompt.md");
+  const defaultStorageScoped = path.join(EXTENSION_ANALYZER_ROOT, queueEntry.id, "prompt.md");
+  if (existsSync(extensionScoped)) return extensionScoped;
+  if (existsSync(legacyVersionScoped)) return legacyVersionScoped;
+  if (existsSync(defaultStorageScoped) && extensionScoped !== defaultStorageScoped) {
+    return defaultStorageScoped;
+  }
+  throw new Error(
+    `prompt.md 不存在。按扩展共用一份：${extensionScoped}（首选）${extensionScoped !== defaultStorageScoped ? ` 或 ${defaultStorageScoped}` : ""}` +
+      `；旧布局可暂用：${legacyVersionScoped}`,
+  );
+}
+
 function ensureExtensionFiles(queueEntry: QueueEntryWithIncomingTime) {
   const artifactRootDir = resolveExtensionArtifactRoot(queueEntry);
-  const promptPath = path.join(artifactRootDir, "prompt.md");
-  const cliConfigPath = resolveCliConfigPath(artifactRootDir);
-
   if (!existsSync(artifactRootDir)) {
     throw new Error(`扩展目录不存在: ${artifactRootDir}`);
   }
-  if (!existsSync(promptPath)) {
-    throw new Error(`prompt.md 不存在: ${promptPath}`);
-  }
+  const promptPath = resolveExtensionPromptPath(queueEntry, artifactRootDir);
+  const cliConfigPath = resolveCliConfigPath(artifactRootDir);
+
   if (!cliConfigPath) {
     throw new Error(`cli_config.json 不存在（兼容 cli.config.json）: ${artifactRootDir}`);
   }
@@ -764,10 +777,6 @@ async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime
   // Log the prompt.md path
 
   console.log(`Using prompt.md from ${promptPath}`);
-
-  if (!existsSync(promptPath)) {
-    throw new Error(`prompt.md not found for extension ${queueEntry.id} at ${promptPath}`);
-  }
 
   const prompt = readFileSync(promptPath, "utf8");
 
