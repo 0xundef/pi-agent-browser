@@ -36,3 +36,4 @@ cli.config.json
 config/pi-agent.config.json
 config/cli.config.json
 samples/
+processings/
