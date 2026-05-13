@@ -590,6 +590,23 @@ function resolveHeadlessForDefaultCliConfig(): boolean {
   return !/^0|false|no|off$/i.test(String(raw).trim());
 }
 
+/**
+ * Tool I/O banners only. Does not affect model thinking (`AGENT_LOG_THINKING`) or `DEBUG_AGENT`.
+ * Set `AGENT_LOG_TOOLS=0` (or `false` / `no` / `off`) to hide [TOOL CALL] / [TOOL RESULT].
+ */
+function agentToolLogsEnabled(): boolean {
+  const raw = process.env.AGENT_LOG_TOOLS;
+  if (raw === undefined || String(raw).trim() === "") return true;
+  return !/^0|false|no|off$/i.test(String(raw).trim());
+}
+
+/** Default on; set `AGENT_LOG_THINKING=0` to hide streamed thinking on stderr. Independent of `AGENT_LOG_TOOLS`. */
+function agentThinkingLogsEnabled(): boolean {
+  const raw = process.env.AGENT_LOG_THINKING;
+  if (raw === undefined || String(raw).trim() === "") return true;
+  return !/^0|false|no|off$/i.test(String(raw).trim());
+}
+
 /** Default cli_config matches known-good MetaMask setup: chromium, headless, userDataDir, no sandbox. */
 function buildDefaultCliConfigPayload(extensionUnpackAbs: string, sidecarRootAbs: string) {
   const abs = path.resolve(extensionUnpackAbs);
@@ -909,6 +926,7 @@ async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime
   });
 
   let streamedText = false;
+  let thinkingStreamStarted = false;
   let agentError: string | undefined;
   agent.subscribe((event: AgentEvent) => {
     // Log text streaming (Agent's response)
@@ -918,15 +936,15 @@ async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime
     }
     
     // Log tool calls (when Agent decides to use a tool)
-    if (event.type === "tool_execution_start") {
+    if (agentToolLogsEnabled() && event.type === "tool_execution_start") {
       const toolName = event.toolName || "unknown";
       const toolInput = event.args || {};
       console.log(`\n🔧 [TOOL CALL] ${toolName}`);
       console.log(`   Input: ${JSON.stringify(toolInput).substring(0, 200)}`);
     }
-    
+
     // Log tool call results
-    if (event.type === "tool_execution_end") {
+    if (agentToolLogsEnabled() && event.type === "tool_execution_end") {
       const toolName = event.toolName || "unknown";
       const result = event.result;
       const resultStr = typeof result === "string" ? result : JSON.stringify(result).substring(0, 300);
@@ -934,22 +952,38 @@ async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime
       console.log(`   ${resultStr}`);
     }
     
-    // Log thinking/reasoning events (if supported by the Agent)
-    if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
-      const thinking = (event as any).assistantMessageEvent.delta;
-      console.log(`\n💭 [THINKING] ${thinking}`);
+    // Model thinking/reasoning stream (stderr; not gated by AGENT_LOG_TOOLS)
+    if (
+      agentThinkingLogsEnabled() &&
+      event.type === "message_update" &&
+      event.assistantMessageEvent.type === "thinking_delta"
+    ) {
+      const delta = (event as any).assistantMessageEvent?.delta;
+      if (typeof delta === "string" && delta.length > 0) {
+        if (!thinkingStreamStarted) {
+          process.stderr.write("\n💭 [THINKING] ");
+          thinkingStreamStarted = true;
+        }
+        process.stderr.write(delta);
+      }
     }
-    
+
     // Log message completion
-    if (event.type === "message_end" && (event.message as any).role === "assistant" && !streamedText) {
-      const blocks = (event.message as any).content as Array<any> | undefined;
-      const text = (blocks ?? [])
-        .filter((b) => b?.type === "text" && typeof b.text === "string")
-        .map((b) => b.text)
-        .join("");
-      if (text.length > 0) {
-        streamedText = true;
-        process.stdout.write(text);
+    if (event.type === "message_end" && (event.message as any).role === "assistant") {
+      if (thinkingStreamStarted) {
+        process.stderr.write("\n");
+        thinkingStreamStarted = false;
+      }
+      if (!streamedText) {
+        const blocks = (event.message as any).content as Array<any> | undefined;
+        const text = (blocks ?? [])
+          .filter((b) => b?.type === "text" && typeof b.text === "string")
+          .map((b) => b.text)
+          .join("");
+        if (text.length > 0) {
+          streamedText = true;
+          process.stdout.write(text);
+        }
       }
       const stopReason = (event.message as any).stopReason as string | undefined;
       const errorMessage = (event.message as any).errorMessage as string | undefined;
