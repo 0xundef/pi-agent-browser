@@ -90,6 +90,16 @@ npm run dev
 npm run dev -- --eid nkbihfbeogaeaoehlefnkodbefgpgknn
 ```
 
+**Direct run (no queue):** pass `--run-extension <id>` to run one AI session immediately from unpacked files under `chrome-extension-analyzer/<id>/`, then **exit**. Does not read `incoming_queue.json` or start queue file watchers. Still writes `status.json` and uses the same timeout (`TASK_TIMEOUT_MS`). If `--version` is omitted, the newest version folder under that id (by directory mtime) is chosen.
+
+```bash
+npm run dev -- --run-extension nkbihfbeogaeaoehlefnkodbefgpgknn
+npm run dev -- --run-extension nkbihfbeogaeaoehlefnkodbefgpgknn --version 12.17.3_0
+npm run dev -- --run-extension nkbihfbeogaeaoehlefnkodbefgpgknn --artifact-root /abs/path/to/unpacked
+```
+
+Shorthand: `--run <id>` or `--run-extension=<id>`. With `--run-extension`, `--eid` is ignored.
+
 ### Simulate External Queue Push
 
 Use the standalone script to mimic an external enqueue (keeps `index.ts` unchanged):

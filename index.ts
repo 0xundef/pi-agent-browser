@@ -6,8 +6,10 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
+  statSync,
   watch,
   writeFileSync
 } from "node:fs";
@@ -579,6 +581,26 @@ function resolveExtensionSidecarRoot(queueEntry: Pick<QueueEntry, "id" | "versio
   return path.join(AGENT_QUEUE_ROOT, EXTENSION_SIDE_DATA, queueEntry.id, queueEntry.version);
 }
 
+/** Picks the newest unpacked version folder under `chrome-extension-analyzer/<id>/` by mtime. */
+function resolveLatestAnalyzerVersion(extensionId: string): string | undefined {
+  const base = path.join(EXTENSION_ANALYZER_ROOT, extensionId);
+  if (!existsSync(base)) return undefined;
+  const names = readdirSync(base);
+  const dirs: { name: string; mtime: number }[] = [];
+  for (const name of names) {
+    const p = path.join(base, name);
+    try {
+      const st = statSync(p);
+      if (st.isDirectory()) dirs.push({ name, mtime: st.mtimeMs });
+    } catch {
+      /* skip */
+    }
+  }
+  if (dirs.length === 0) return undefined;
+  dirs.sort((a, b) => b.mtime - a.mtime);
+  return dirs[0].name;
+}
+
 function resolveCliConfigPath(sidecarRootDir: string): string | undefined {
   const p = path.join(sidecarRootDir, "cli_config.json");
   return existsSync(p) ? p : undefined;
@@ -1031,14 +1053,33 @@ function resolveTaskTimeoutMs(): number {
   return Math.floor(parsed);
 }
 
+type DirectRunCli = {
+  id: string;
+  version?: string;
+  artifactRoot?: string;
+};
+
 type DevCliOptions = {
   /** When set, only queue entries with this extension `id` are considered. */
   extensionIdFilter?: string;
+  /**
+   * Run one agent session for this extension and exit (does not read `incoming_queue.json` or start file watchers).
+   * Unpacked extension must exist under `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<id>/<version>/`.
+   */
+  directRun?: DirectRunCli;
 };
 
-/** Parses args after `node` / script, e.g. `npm run dev -- --eid nkbihfbeogaeaoehlefnkodbefgpgknn`. */
+/**
+ * Parses args after `node` / script, e.g. `npm run dev -- --eid …` or `npm run dev -- --run-extension …`.
+ * `--version` / `--artifact-root` apply to `--run-extension` when present (order-independent).
+ */
 function parseDevCliOptions(argv: string[]): DevCliOptions {
   let extensionIdFilter: string | undefined;
+  let directRunId: string | undefined;
+  let directRunVersion: string | undefined;
+  let directRunArtifactRoot: string | undefined;
+  let directRunRequested: boolean | undefined;
+
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--eid" || a === "-eid") {
@@ -1051,10 +1092,73 @@ function parseDevCliOptions(argv: string[]): DevCliOptions {
     }
     if (a.startsWith("--eid=")) {
       extensionIdFilter = a.slice("--eid=".length).trim();
+      continue;
+    }
+    if (a === "--run-extension" || a === "--run") {
+      directRunRequested = true;
+      const next = argv[i + 1];
+      if (next && !next.startsWith("-")) {
+        directRunId = next.trim();
+        i++;
+      }
+      continue;
+    }
+    if (a.startsWith("--run-extension=")) {
+      directRunRequested = true;
+      directRunId = a.slice("--run-extension=".length).trim();
+      continue;
+    }
+    if (a.startsWith("--run=") && a !== "--run-extension" && !a.startsWith("--run-extension=")) {
+      directRunRequested = true;
+      directRunId = a.slice("--run=".length).trim();
+      continue;
+    }
+    if (a === "--version") {
+      const next = argv[i + 1];
+      if (next && !next.startsWith("-")) {
+        directRunVersion = next.trim();
+        i++;
+      }
+      continue;
+    }
+    if (a.startsWith("--version=")) {
+      directRunVersion = a.slice("--version=".length).trim();
+      continue;
+    }
+    if (a === "--artifact-root") {
+      const next = argv[i + 1];
+      if (next && !next.startsWith("-")) {
+        directRunArtifactRoot = next.trim();
+        i++;
+      }
+      continue;
+    }
+    if (a.startsWith("--artifact-root=")) {
+      directRunArtifactRoot = a.slice("--artifact-root=".length).trim();
     }
   }
   if (extensionIdFilter === "") extensionIdFilter = undefined;
-  return extensionIdFilter ? { extensionIdFilter } : {};
+  if (directRunId === "") directRunId = undefined;
+  if (directRunVersion === "") directRunVersion = undefined;
+  if (directRunArtifactRoot === "") directRunArtifactRoot = undefined;
+
+  let directRun: DirectRunCli | undefined;
+  if (directRunRequested) {
+    if (!directRunId) {
+      directRun = { id: "" };
+    } else {
+      directRun = {
+        id: directRunId,
+        ...(directRunVersion ? { version: directRunVersion } : {}),
+        ...(directRunArtifactRoot ? { artifactRoot: path.resolve(directRunArtifactRoot) } : {})
+      };
+    }
+  }
+
+  return {
+    ...(extensionIdFilter ? { extensionIdFilter } : {}),
+    ...(directRun ? { directRun } : {})
+  };
 }
 
 async function runWithTimeout<T>(
@@ -1078,11 +1182,107 @@ async function runWithTimeout<T>(
   }
 }
 
+/** One-shot agent run: no `incoming_queue.json`, no file watchers; updates `status.json` like queue mode. */
+async function runDirectExtensionOnce(
+  direct: DirectRunCli,
+  runtime: RuntimeConfig,
+  taskTimeoutMs: number
+): Promise<void> {
+  if (!direct.id.trim()) {
+    console.error(
+      `[${new Date().toISOString()}] --run-extension requires a Chrome Web Store extension id, e.g. npm run dev -- --run-extension nkbihfbeogaeaoehlefnkodbefgpgknn`
+    );
+    process.exit(1);
+  }
+  const id = direct.id.trim();
+
+  let version = direct.version?.trim();
+  if (!version) {
+    const picked = resolveLatestAnalyzerVersion(id);
+    if (!picked) {
+      console.error(
+        `[${new Date().toISOString()}] No unpacked extension under ${path.join(EXTENSION_ANALYZER_ROOT, id)}. Unpack a version directory or pass --version <folderName> (same as under chrome-extension-analyzer/<id>/).`
+      );
+      process.exit(1);
+    }
+    version = picked;
+    console.log(
+      `[${new Date().toISOString()}] Direct run: using version folder "${version}" (latest mtime under ${EXTENSION_ANALYZER_DIR}/${id}/).`
+    );
+  }
+
+  const index = Date.now();
+  const runId = `${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${id.slice(0, 8)}`;
+
+  const queueEntry: QueueEntryWithIncomingTime = {
+    id,
+    version,
+    index,
+    runId,
+    reason: "direct_cli",
+    incoming_time: new Date().toISOString(),
+    ...(direct.artifactRoot ? { artifactRoot: direct.artifactRoot } : {})
+  };
+
+  const unpackRoot = resolveExtensionArtifactRoot(queueEntry);
+  const taskLabel = `id=${id}, runId=${runId} (direct)`;
+  console.log(
+    `[${new Date().toISOString()}] Direct extension run (no queue): ${taskLabel}, unpack=${unpackRoot}, timeout=${taskTimeoutMs}ms`
+  );
+
+  let status = loadStatus();
+  status = updateStatus(
+    status,
+    { id, version, status: "running", index, runId, error: undefined },
+    queueEntry
+  );
+
+  try {
+    await runWithTimeout(runExtensionAgent(queueEntry, runtime), taskTimeoutMs, taskLabel);
+    status = loadStatus();
+    updateStatus(
+      status,
+      { id, version, status: "complete", index, runId, error: undefined },
+      queueEntry
+    );
+    console.log(`[${new Date().toISOString()}] Direct run completed: ${taskLabel}`);
+    process.exit(0);
+  } catch (error: any) {
+    const errorMessage = error?.message ?? String(error);
+    const isTimeout = typeof errorMessage === "string" && errorMessage.startsWith("Task timed out after");
+    status = loadStatus();
+    updateStatus(
+      status,
+      { id, version, status: "error", index, runId, error: errorMessage },
+      queueEntry
+    );
+    if (isTimeout) {
+      console.error(
+        `[${new Date().toISOString()}] Direct run TIMEOUT: ${taskLabel}, timeout=${taskTimeoutMs}ms`
+      );
+    } else {
+      console.error(`[${new Date().toISOString()}] Direct run failed: ${errorMessage}`);
+    }
+    process.exit(1);
+  }
+}
+
 async function main() {
-  let isProcessing = false;
   const runtime = resolveRuntimeConfig(loadFileConfig());
   const taskTimeoutMs = resolveTaskTimeoutMs();
   const devCli = parseDevCliOptions(process.argv.slice(2));
+
+  if (devCli.directRun) {
+    if (devCli.extensionIdFilter) {
+      console.log(
+        `[${new Date().toISOString()}] Note: --eid is ignored when --run-extension is set (direct run).`
+      );
+    }
+    await runDirectExtensionOnce(devCli.directRun, runtime, taskTimeoutMs);
+    return;
+  }
+
+  let isProcessing = false;
   const eidFilter = devCli.extensionIdFilter;
 
   async function tryProcessLatest() {
