@@ -417,6 +417,8 @@ const validateRecordingsTool: AgentTool<typeof validateRecordingsParameters, { v
 
 const EXTENSION_ANALYZER_DIR = "chrome-extension-analyzer";
 const AGENT_QUEUE_DIR = "agent-queue";
+/** Must match oarmour-site `EXTENSION_SIDE_DATA_DIRNAME`: sidecar for cli_config, analysis, ai_testing. */
+const EXTENSION_SIDE_DATA = "extension-data";
 const extensionStorageRoot = process.env.EXTENSION_STORAGE_ROOT?.trim()
   ? path.resolve(process.env.EXTENSION_STORAGE_ROOT.trim())
   : os.tmpdir();
@@ -525,7 +527,13 @@ function updateStatus(
   }
   const runId = queueEntry?.runId ?? (queueEntry?.index !== undefined ? String(queueEntry.index) : entry.runId);
   if (runId) {
-    nextEntry.recordingsPath = path.join(resolveExtensionArtifactRoot(queueEntry ?? entry), "ai_testing", runId, "recordings.json");
+    const ref = queueEntry ?? entry;
+    nextEntry.recordingsPath = path.join(
+      resolveExtensionSidecarRoot({ id: ref.id, version: ref.version }),
+      "ai_testing",
+      runId,
+      "recordings.json"
+    );
   }
 
   if (idx >= 0) status[idx] = nextEntry;
@@ -567,8 +575,12 @@ function resolveExtensionArtifactRoot(queueEntry: Pick<QueueEntry, "id" | "versi
   return path.join(EXTENSION_ANALYZER_ROOT, queueEntry.id, queueEntry.version);
 }
 
-function resolveCliConfigPath(extensionRootDir: string): string | undefined {
-  const p = path.join(extensionRootDir, "cli_config.json");
+function resolveExtensionSidecarRoot(queueEntry: Pick<QueueEntry, "id" | "version">): string {
+  return path.join(AGENT_QUEUE_ROOT, EXTENSION_SIDE_DATA, queueEntry.id, queueEntry.version);
+}
+
+function resolveCliConfigPath(sidecarRootDir: string): string | undefined {
+  const p = path.join(sidecarRootDir, "cli_config.json");
   return existsSync(p) ? p : undefined;
 }
 
@@ -579,10 +591,11 @@ function resolveHeadlessForDefaultCliConfig(): boolean {
 }
 
 /** Default cli_config matches known-good MetaMask setup: chromium, headless, userDataDir, no sandbox. */
-function buildDefaultCliConfigPayload(extensionRootAbs: string) {
-  const abs = path.resolve(extensionRootAbs);
+function buildDefaultCliConfigPayload(extensionUnpackAbs: string, sidecarRootAbs: string) {
+  const abs = path.resolve(extensionUnpackAbs);
+  const sidecar = path.resolve(sidecarRootAbs);
   const userDataDir =
-    process.env.PLAYWRIGHT_CLI_USER_DATA_DIR?.trim() || path.join(abs, ".playwright-profile");
+    process.env.PLAYWRIGHT_CLI_USER_DATA_DIR?.trim() || path.join(sidecar, ".playwright-profile");
   return {
     browser: {
       launchOptions: {
@@ -602,11 +615,11 @@ function buildDefaultCliConfigPayload(extensionRootAbs: string) {
   };
 }
 
-function writeDefaultCliConfigIfMissing(extensionRootDir: string): void {
-  if (resolveCliConfigPath(extensionRootDir)) return;
-  const abs = path.resolve(extensionRootDir);
-  const dest = path.join(abs, "cli_config.json");
-  const payload = buildDefaultCliConfigPayload(extensionRootDir);
+function writeDefaultCliConfigIfMissing(sidecarRootDir: string, unpackRootDir: string): void {
+  if (resolveCliConfigPath(sidecarRootDir)) return;
+  const sidecar = path.resolve(sidecarRootDir);
+  const dest = path.join(sidecar, "cli_config.json");
+  const payload = buildDefaultCliConfigPayload(unpackRootDir, sidecarRootDir);
   const dir = path.dirname(dest);
   mkdirSync(dir, { recursive: true });
   const tmpPath = path.join(dir, `.cli_config.json.${process.pid}.${Date.now()}.tmp`);
@@ -634,16 +647,19 @@ function ensureExtensionFiles(queueEntry: QueueEntryWithIncomingTime) {
   if (!existsSync(artifactRootDir)) {
     throw new Error(`扩展目录不存在: ${artifactRootDir}`);
   }
+  const sidecarRootDir = resolveExtensionSidecarRoot(queueEntry);
+  mkdirSync(sidecarRootDir, { recursive: true });
   const promptPath = resolveExtensionPromptPath(queueEntry);
-  writeDefaultCliConfigIfMissing(artifactRootDir);
-  const cliConfigPath = resolveCliConfigPath(artifactRootDir);
+  writeDefaultCliConfigIfMissing(sidecarRootDir, artifactRootDir);
+  const cliConfigPath = resolveCliConfigPath(sidecarRootDir);
 
   if (!cliConfigPath) {
-    throw new Error(`cli_config.json 不存在: ${artifactRootDir}`);
+    throw new Error(`cli_config.json 不存在: ${sidecarRootDir}`);
   }
 
   return {
     extensionRootDir: artifactRootDir,
+    sidecarRootDir,
     versionDir: artifactRootDir,
     promptPath,
     cliConfigPath
@@ -688,14 +704,14 @@ function browserGuardCloseAllBeforeOpen(): boolean {
 }
 
 /** Release playwright-cli managed browsers before a new open, reduces \"Browser is already in use\". Non-fatal on failure. */
-function maybeClosePlaywrightCliSessionsBeforeOpen(extDir: string): void {
+function maybeClosePlaywrightCliSessionsBeforeOpen(shellCwd: string): void {
   if (!browserGuardCloseAllBeforeOpen()) {
     console.log(`[${new Date().toISOString()}] [browser-guard] skip close-all (BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN=off)`);
     return;
   }
   try {
     execSync("playwright-cli close-all", {
-      cwd: extDir,
+      cwd: shellCwd,
       encoding: "utf8",
       stdio: "pipe",
       maxBuffer: 1024 * 1024,
@@ -712,7 +728,13 @@ function resolveProfileDirectory(profileArg: string, shellCwd: string): string {
   return path.isAbsolute(profileArg) ? path.normalize(profileArg) : path.resolve(shellCwd, profileArg);
 }
 
-function applyPlaywrightOpenGuard(command: string, extDir: string, queueEntry: QueueEntry, shellCwd: string): string {
+function applyPlaywrightOpenGuard(
+  command: string,
+  _unpackExtDir: string,
+  sidecarDir: string,
+  queueEntry: QueueEntry,
+  shellCwd: string
+): string {
   if (!/\bplaywright-cli\s+open\b/.test(command)) {
     return command;
   }
@@ -726,7 +748,7 @@ function applyPlaywrightOpenGuard(command: string, extDir: string, queueEntry: Q
   }
 
   const runId = getQueueRunId(queueEntry);
-  const isolatedProfileDir = path.join(extDir, "ai_testing", runId, ".playwright-profile");
+  const isolatedProfileDir = path.join(sidecarDir, "ai_testing", runId, ".playwright-profile");
   mkdirSync(isolatedProfileDir, { recursive: true });
   cleanupProfileLocks(isolatedProfileDir);
   console.log(
@@ -735,19 +757,23 @@ function applyPlaywrightOpenGuard(command: string, extDir: string, queueEntry: Q
   return `${command} --persistent --profile=${JSON.stringify(isolatedProfileDir)}`;
 }
 
-function createExtensionShellCommandTool(extDir: string, queueEntry: QueueEntry): AgentTool<typeof shellCommandParameters, any> {
+function createExtensionShellCommandTool(
+  extDir: string,
+  sidecarDir: string,
+  queueEntry: QueueEntry
+): AgentTool<typeof shellCommandParameters, any> {
   return {
     name: "shell_command",
     label: "Execute shell command",
-    description: `Executes a shell command and returns stdout, stderr, and exit code. Default working directory: ${extDir}`,
+    description: `Executes a shell command and returns stdout, stderr, and exit code. Default working directory: ${sidecarDir} (cli_config.json). Unpacked extension: ${extDir}.`,
     parameters: shellCommandParameters,
     async execute(_toolCallId: string, params: ShellCommandParameters) {
       try {
-        const shellCwd = params.cwd ? path.resolve(extDir, params.cwd) : extDir;
+        const shellCwd = params.cwd ? path.resolve(sidecarDir, params.cwd) : sidecarDir;
         if (/\bplaywright-cli\s+open\b/.test(params.command)) {
-          maybeClosePlaywrightCliSessionsBeforeOpen(extDir);
+          maybeClosePlaywrightCliSessionsBeforeOpen(shellCwd);
         }
-        const guardedCommand = applyPlaywrightOpenGuard(params.command, extDir, queueEntry, shellCwd);
+        const guardedCommand = applyPlaywrightOpenGuard(params.command, extDir, sidecarDir, queueEntry, shellCwd);
         const result = execSync(guardedCommand, {
           cwd: shellCwd,
           encoding: "utf8",
@@ -770,14 +796,14 @@ function createExtensionShellCommandTool(extDir: string, queueEntry: QueueEntry)
   };
 }
 
-function createExtensionValidateTool(extDir: string, runId: string): AgentTool<typeof validateRecordingsParameters, any> {
+function createExtensionValidateTool(sidecarDir: string, runId: string): AgentTool<typeof validateRecordingsParameters, any> {
   return {
     name: "validate_recordings",
     label: "Validate recordings.json",
     description: `Validates that recordings.json in the 'ai_testing/${runId}/' subfolder has the correct schema. Each entry must have time(string), thinking(string), image(string ending with .png/.jpg).`,
     parameters: validateRecordingsParameters,
     async execute(_toolCallId: string) {
-      const dataPath = path.join(extDir, "ai_testing", runId, "recordings.json");
+      const dataPath = path.join(sidecarDir, "ai_testing", runId, "recordings.json");
       if (!existsSync(dataPath)) {
         return { content: [{ type: "text", text: `ERROR: ai_testing/${runId}/recordings.json does not exist. Create it first.` }], details: { valid: false, errors: ["file_not_found"] } };
       }
@@ -816,7 +842,7 @@ const recordStepParameters = Type.Object({
 });
 type RecordStepParameters = Static<typeof recordStepParameters>;
 
-function createExtensionRecordStepTool(extDir: string, runId: string): AgentTool<typeof recordStepParameters, { index: number }> {
+function createExtensionRecordStepTool(sidecarDir: string, runId: string): AgentTool<typeof recordStepParameters, { index: number }> {
   return {
     name: "record_step",
     label: "Record operation step",
@@ -824,7 +850,7 @@ function createExtensionRecordStepTool(extDir: string, runId: string): AgentTool
     parameters: recordStepParameters,
     async execute(_toolCallId: string, params: RecordStepParameters) {
       // Create subfolder inside ai_testing directory
-      const aiTestingDir = path.join(extDir, "ai_testing");
+      const aiTestingDir = path.join(sidecarDir, "ai_testing");
       const indexSubfolder = path.join(aiTestingDir, runId);
       if (!existsSync(indexSubfolder)) {
         execSync(`mkdir -p "${indexSubfolder}"`);
@@ -857,7 +883,7 @@ function createExtensionRecordStepTool(extDir: string, runId: string): AgentTool
 }
 
 async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime: RuntimeConfig) {
-  const { extensionRootDir: extDir, promptPath } = ensureExtensionFiles(queueEntry);
+  const { extensionRootDir: extDir, sidecarRootDir: dataDir, promptPath } = ensureExtensionFiles(queueEntry);
   const runId = getQueueRunId(queueEntry);
   // Log the prompt.md path
 
@@ -872,10 +898,10 @@ async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime
       tools: [
         getTimeTool,
         addTool,
-        createExtensionShellCommandTool(extDir, queueEntry),
+        createExtensionShellCommandTool(extDir, dataDir, queueEntry),
         generateMnemonicTool,
-        createExtensionValidateTool(extDir, runId),
-        createExtensionRecordStepTool(extDir, runId)
+        createExtensionValidateTool(dataDir, runId),
+        createExtensionRecordStepTool(dataDir, runId)
       ]
     },
     getApiKey: (provider: string) =>
