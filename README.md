@@ -36,7 +36,7 @@ npm run dev
 | `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<extensionId>/<version>/` | Unpacked extension exact version directory |
 | `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<extensionId>/prompt.md` | Optional **per-extension** prompt (overrides global) |
 | `$AGENT_QUEUE_ROOT/prompt.md` | **Default prompt** for all extensions; OArmour seeds this from its bundled template on enqueue; locally, `resources/default-extension-test-prompt.md` is copied here if missing |
-| `<artifactRoot>/cli_config.json` | Runtime config (兼容 `cli.config.json`) |
+| `<artifactRoot>/cli_config.json` | Runtime config; **auto-created** if missing (`chromium`, `headless` default true, `userDataDir` = `<artifact>/.playwright-profile`, `--no-sandbox` / `--disable-setuid-sandbox`, dynamic `--load-extension` paths) |
 | `<artifactRoot>/ai_testing/<runId>/` | Agent execution artifacts (`recordings.json` and screenshots) |
 | `scripts/enqueue-task.ts` | Simulate external system queue push |
 
@@ -59,7 +59,7 @@ npm run dev
 2. 每次只取队列中“最新一条”（按 `incoming_time`，同时间按 `index`）。
 3. 处理时会校验扩展固定结构：
    - `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<id>/<version>/` 必须存在
-   - `<artifactRoot>/cli_config.json`（兼容 `cli.config.json`）必须存在
+   - `<artifactRoot>/cli_config.json`：若不存在会自动生成（chromium、`userDataDir` 默认 `<artifactRoot>/.playwright-profile`，可用 `PLAYWRIGHT_CLI_USER_DATA_DIR` 覆盖；默认 headless，可用 `PLAYWRIGHT_CLI_HEADLESS=0` 关闭）
    - 优先 `chrome-extension-analyzer/<id>/prompt.md`；不存在则使用 `AGENT_QUEUE_ROOT/prompt.md`（OArmour 会从内置模板同步；独立运行时会从 `resources/default-extension-test-prompt.md` 复制）
 4. 调用 `runExtensionAgent` 读取 `prompt.md`，由 prompt 驱动 Agent 调用 `playwright-cli` 等工具执行真实流程。
    - 对 `playwright-cli open` 增加“浏览器会话保护”最小策略：**每次 open 前默认执行一次 `playwright-cli close-all`**（可通过 `BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN=0` 关闭）；优先复用命令里已有 `--profile`（并在启动前清理常见 Chromium 锁文件 `SingletonLock` 等）；若命令未带 `--profile`，则自动追加 `--persistent` 并隔离到 `<artifactRoot>/ai_testing/<runId>/.playwright-profile`，降低 `Browser is already in use` 链式失败概率。
@@ -124,7 +124,7 @@ Failed to initialize sandbox. sandbox initialization failed: Operation not permi
 GPU process isn't usable. Goodbye.
 ```
 
-This happens because Playwright's automated test environment restricts certain system calls. Fix: add `--no-sandbox` and `--disable-gpu` to the launch args in `.playwright/cli.config.json`.
+This happens because Playwright's automated test environment restricts certain system calls. Fix: add `--no-sandbox` and `--disable-gpu` to the `browser.launchOptions.args` array in the extension artifact’s **`cli_config.json`** (or adjust the auto-generated file after it is created).
 
 ### 4. Chrome for Testing Binaries Were Never Downloaded
 
@@ -138,7 +138,7 @@ Fix: run `npx playwright install chromium` separately.
 
 ### 5. Config File Path Was Wrong in the Agent Prompt
 
-The default prompt in `index.ts` pointed to `.playwright/cli.config.json` using a relative path. Depending on the agent's working directory, this could resolve to the wrong file or miss entirely. Fix: use the absolute path `/Volumes/T7/repos/pi-agent-browser/.playwright/cli.config.json`.
+The agent prompt must point at the extension artifact’s **`cli_config.json`** using a path that resolves correctly from the shell cwd (prefer an absolute path to `…/chrome-extension-analyzer/<id>/<version>/cli_config.json`).
 
 ---
 
@@ -149,10 +149,10 @@ The default prompt in `index.ts` pointed to `.playwright/cli.config.json` using 
 | 1 | **Config file rename** | Renamed `pi-agent.config.json` to `config.json`; updated `loadFileConfig()` in [index.ts](file:///Volumes/T7/repos/pi-agent-browser/index.ts#L73-L77) to check both names. |
 | 2 | **Missing `bip39` dependency** | Added `bip39` + `@types/bip39` to `package.json`; ran `npm install`. |
 | 3 | **Extension unpacking** | Extracted `metamask.crx` to the shared artifact root (stripped CRX header to get ZIP, then unzipped). |
-| 4 | **Chrome crash on launch** | Added `--no-sandbox` and `--disable-gpu` to `.playwright/cli.config.json` launch args. |
+| 4 | **Chrome crash on launch** | Added `--no-sandbox` and `--disable-gpu` to extension artifact `cli_config.json` launch args. |
 | 5 | **Persistent profile required** | Launch command now uses `--persistent --profile=/Volumes/T7/repos/pi-agent-browser/.playwright/profile`. |
 | 6 | **CFT binaries missing** | Ran `npx playwright install chromium` to download Chrome for Testing. |
-| 7 | **Config path in prompt** | Updated the default agent prompt in [index.ts](file:///Volumes/T7/repos/pi-agent-browser/index.ts#L381) to use the absolute path to `.playwright/cli.config.json`. |
+| 7 | **Config path in prompt** | Use absolute path to extension artifact `cli_config.json` in agent instructions. |
 | 8 | **Verified injection** | Confirmed `window.ethereum` and `window.ethereum.isMetaMask` are `true` on the MetaMask test dapp. |
 
 ---
@@ -163,19 +163,19 @@ The default prompt in `index.ts` pointed to `.playwright/cli.config.json` using 
 # Ensure everything is set up
 npx playwright install chromium
 
-# Launch the agent (it will use .playwright/cli.config.json which loads MetaMask)
+# Launch the agent (queue tasks; each run uses `<artifactRoot>/cli_config.json`)
 node index.ts
 ```
 
-Or launch the browser manually:
+Or launch the browser manually from an unpacked extension directory:
 
 ```bash
 playwright-cli close-all
 playwright-cli open \
-  --config=/Volumes/T7/repos/pi-agent-browser/.playwright/cli.config.json \
+  --config=/absolute/path/to/chrome-extension-analyzer/<extensionId>/<version>/cli_config.json \
   --headed \
   --persistent \
-  --profile=/Volumes/T7/repos/pi-agent-browser/.playwright/profile
+  --profile=/path/to/your/playwright-profile
 ```
 
 Then verify MetaMask is loaded on a normal **HTTPS** page (e.g. a test dapp tab), not on `chrome-extension://` UI—extension pages often **block `eval`**, so `playwright-cli eval` can fail there. See `resources/metamask-prompt.md` for prompt constraints.

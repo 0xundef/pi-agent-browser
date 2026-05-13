@@ -540,11 +540,51 @@ function resolveExtensionArtifactRoot(queueEntry: Pick<QueueEntry, "id" | "versi
 }
 
 function resolveCliConfigPath(extensionRootDir: string): string | undefined {
-  const preferred = path.join(extensionRootDir, "cli_config.json");
-  if (existsSync(preferred)) return preferred;
-  const compat = path.join(extensionRootDir, "cli.config.json");
-  if (existsSync(compat)) return compat;
-  return undefined;
+  const p = path.join(extensionRootDir, "cli_config.json");
+  return existsSync(p) ? p : undefined;
+}
+
+function resolveHeadlessForDefaultCliConfig(): boolean {
+  const raw = process.env.PLAYWRIGHT_CLI_HEADLESS;
+  if (raw === undefined || String(raw).trim() === "") return true;
+  return !/^0|false|no|off$/i.test(String(raw).trim());
+}
+
+/** Default cli_config matches known-good MetaMask setup: chromium, headless, userDataDir, no sandbox. */
+function buildDefaultCliConfigPayload(extensionRootAbs: string) {
+  const abs = path.resolve(extensionRootAbs);
+  const userDataDir =
+    process.env.PLAYWRIGHT_CLI_USER_DATA_DIR?.trim() || path.join(abs, ".playwright-profile");
+  return {
+    browser: {
+      launchOptions: {
+        headless: resolveHeadlessForDefaultCliConfig(),
+        channel: "chromium",
+        args: [
+          `--load-extension=${abs}`,
+          `--disable-extensions-except=${abs}`,
+          "--no-sandbox",
+          "--disable-setuid-sandbox"
+        ]
+      },
+      browserName: "chromium",
+      userDataDir,
+      chromiumSandbox: false
+    }
+  };
+}
+
+function writeDefaultCliConfigIfMissing(extensionRootDir: string): void {
+  if (resolveCliConfigPath(extensionRootDir)) return;
+  const abs = path.resolve(extensionRootDir);
+  const dest = path.join(abs, "cli_config.json");
+  const payload = buildDefaultCliConfigPayload(extensionRootDir);
+  const dir = path.dirname(dest);
+  mkdirSync(dir, { recursive: true });
+  const tmpPath = path.join(dir, `.cli_config.json.${process.pid}.${Date.now()}.tmp`);
+  writeFileSync(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  renameSync(tmpPath, dest);
+  console.log(`[${new Date().toISOString()}] [browseragent] wrote default cli_config.json: ${dest}`);
 }
 
 /**
@@ -567,10 +607,11 @@ function ensureExtensionFiles(queueEntry: QueueEntryWithIncomingTime) {
     throw new Error(`扩展目录不存在: ${artifactRootDir}`);
   }
   const promptPath = resolveExtensionPromptPath(queueEntry);
+  writeDefaultCliConfigIfMissing(artifactRootDir);
   const cliConfigPath = resolveCliConfigPath(artifactRootDir);
 
   if (!cliConfigPath) {
-    throw new Error(`cli_config.json 不存在（兼容 cli.config.json）: ${artifactRootDir}`);
+    throw new Error(`cli_config.json 不存在: ${artifactRootDir}`);
   }
 
   return {

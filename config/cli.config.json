@@ -1,0 +1,6 @@
+{
+  "browser": {
+    "browserName": "chromium",
+    "userDataDir": ".playwright/profile"
+  }
+}
