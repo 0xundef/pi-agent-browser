@@ -37,10 +37,10 @@ npm run dev
 | `.env` (from `.env.example`) | AI provider credentials and model (`PI_*`, `ANTHROPIC_*`, `OPENAI_*`); loaded via `dotenv` |
 | `config/pi-agent.config.json` | Optional JSON provider config (same shape as before); use `PI_CONFIG` to point elsewhere |
 | `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<extensionId>/<version>/` | Unpacked extension exact version directory |
-| `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<extensionId>/prompt.md` | Optional **per-extension** prompt (overrides global) |
+| `$AGENT_QUEUE_ROOT/extension-data/<extensionId>/prompt.md` | Optional **per-extension** prompt (overrides global) |
 | `$AGENT_QUEUE_ROOT/prompt.md` | **Default prompt** for all extensions; OArmour seeds this from its bundled template on enqueue; locally, `resources/default-extension-test-prompt.md` is copied here if missing |
-| `<artifactRoot>/cli_config.json` | Runtime config; **auto-created** if missing (`chromium`, `headless` default true, `userDataDir` = `<artifact>/.playwright-profile`, `--no-sandbox` / `--disable-setuid-sandbox`, dynamic `--load-extension` paths) |
-| `<artifactRoot>/ai_testing/<runId>/` | Agent execution artifacts (`recordings.json` and screenshots) |
+| `$AGENT_QUEUE_ROOT/extension-data/<extensionId>/<version>/cli_config.json` | Runtime config; **auto-created** if missing (`chromium`, `headless` default true, `userDataDir` defaults to `<sidecar>/.playwright-profile`, `--no-sandbox` / `--disable-setuid-sandbox`, `--load-extension` points at unpacked extension under `chrome-extension-analyzer`) |
+| `$AGENT_QUEUE_ROOT/extension-data/<extensionId>/<version>/ai_testing/<runId>/` | Agent execution artifacts (`recordings.json` and screenshots) |
 | `scripts/enqueue-task.ts` | Simulate external system queue push |
 
 ### Queue and Status Fields
@@ -56,29 +56,29 @@ npm run dev
 
 ## Processing Flow (Prompt-Agent + Playwright CLI)
 
-`node index.ts` 会启动一个常驻服务，核心规则如下：
+`node index.ts` starts a long-running service. Core behavior:
 
-1. 仅在服务 `idle` 时才会从 `incoming_queue.json` 取任务。
-2. 每次只取队列中“最新一条”（按 `incoming_time`，同时间按 `index`）。
-3. 处理时会校验扩展固定结构：
-   - `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<id>/<version>/` 必须存在
-   - `<artifactRoot>/cli_config.json`：若不存在会自动生成（chromium、`userDataDir` 默认 `<artifactRoot>/.playwright-profile`，可用 `PLAYWRIGHT_CLI_USER_DATA_DIR` 覆盖；默认 headless，可用 `PLAYWRIGHT_CLI_HEADLESS=0` 关闭）
-   - 优先 `chrome-extension-analyzer/<id>/prompt.md`；不存在则使用 `AGENT_QUEUE_ROOT/prompt.md`（OArmour 会从内置模板同步；独立运行时会从 `resources/default-extension-test-prompt.md` 复制）
-4. 调用 `runExtensionAgent` 读取 `prompt.md`，由 prompt 驱动 Agent 调用 `playwright-cli` 等工具执行真实流程。
-   - 对 `playwright-cli open` 增加“浏览器会话保护”最小策略：**每次 open 前默认执行一次 `playwright-cli close-all`**（可通过 `BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN=0` 关闭）；优先复用命令里已有 `--profile`（并在启动前清理常见 Chromium 锁文件 `SingletonLock` 等）；若命令未带 `--profile`，则自动追加 `--persistent` 并隔离到 `<artifactRoot>/ai_testing/<runId>/.playwright-profile`，降低 `Browser is already in use` 链式失败概率。
-   - 启动日志会打印 `[browser-guard]`，用于观察 close-all / 锁清理 / 隔离目录是否生效。
-5. 运行过程中通过 `record_step` 工具向 `<artifactRoot>/ai_testing/<runId>/recordings.json` 持续写入步骤，并保存对应截图。
-6. 完成或失败后，`status.json` 会更新：
+1. Tasks are read from `incoming_queue.json` only while the service is **idle** (not already running a job).
+2. Each pick takes the **newest** queue entry (`incoming_time`, then `index` if tied).
+3. Processing validates the expected layout:
+   - `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<id>/<version>/` must exist (unpacked extension).
+   - `$AGENT_QUEUE_ROOT/extension-data/<id>/<version>/cli_config.json` is created if missing (`chromium`; default `userDataDir` is `<sidecar>/.playwright-profile`; override with `PLAYWRIGHT_CLI_USER_DATA_DIR`; headless by default, set `PLAYWRIGHT_CLI_HEADLESS=0` to disable).
+   - Prompt resolution prefers `$AGENT_QUEUE_ROOT/extension-data/<id>/prompt.md`, then falls back to `$AGENT_QUEUE_ROOT/prompt.md` (OArmour seeds the default from its bundled template; standalone runs copy `resources/default-extension-test-prompt.md` when missing).
+4. `runExtensionAgent` loads `prompt.md` and drives tools such as `playwright-cli`.
+   - **Browser guard** around `playwright-cli open`: by default **`playwright-cli close-all` runs before each open** (disable with `BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN=0`); reuse an existing `--profile` when present (and clear common Chromium lock files like `SingletonLock` before launch); if the command has no `--profile`, append `--persistent` and use an isolated profile at `$AGENT_QUEUE_ROOT/extension-data/<id>/<version>/ai_testing/<runId>/.playwright-profile` to reduce `Browser is already in use` failures.
+   - Logs tagged `[browser-guard]` show close-all, lock cleanup, and isolated profile usage.
+5. During the run, `record_step` appends to `$AGENT_QUEUE_ROOT/extension-data/<id>/<version>/ai_testing/<runId>/recordings.json` and stores screenshots in the same folder.
+6. On success or failure, `status.json` is updated with:
    - `status` (`running` / `complete` / `error`)
-   - `status_time`（当前时间）
-   - `duration`（秒）
-7. 单任务硬超时：每个任务执行存在硬超时，超过后会强制以 `status=error` 收尾，错误信息形如 `Task timed out after <ms>ms (id=..., index=...)`，并刷新 `status_time` / `duration`。
-   - 默认 10 分钟（`600000` ms）。
-   - 通过环境变量 `TASK_TIMEOUT_MS` 覆盖（毫秒），例如：
+   - `status_time`
+   - `duration` (seconds)
+7. **Hard timeout** per task: if the run exceeds the limit, status is set to `error` with a message like `Task timed out after <ms>ms (id=..., index=...)`, and `status_time` / `duration` are refreshed.
+   - Default: 10 minutes (`600000` ms).
+   - Override with `TASK_TIMEOUT_MS` (milliseconds), for example:
      ```bash
-     TASK_TIMEOUT_MS=300000 npm run dev   # 5 分钟
+     TASK_TIMEOUT_MS=300000 npm run dev   # 5 minutes
      ```
-   - 启动日志会打印当前生效的超时值，便于排查任务卡死。
+   - Startup logs print the effective timeout to help debug stuck tasks.
 
 ```bash
 npm run dev
@@ -92,17 +92,17 @@ npm run dev -- --eid nkbihfbeogaeaoehlefnkodbefgpgknn
 
 ### Simulate External Queue Push
 
-新增独立脚本模拟外部系统入队（不会污染 `index.ts`）：
+Use the standalone script to mimic an external enqueue (keeps `index.ts` unchanged):
 
 ```bash
-# 使用默认参数写入一条任务
+# Enqueue one task with default fields
 npm run enqueue:task
 
-# 自定义任务参数
+# Custom fields
 npm run enqueue:task -- --id nkbihfbeogaeaoehlefnkodbefgpgknn --name MetaMask --version 12.17.3_0 --index 1001
 ```
 
-脚本会写入 `$AGENT_QUEUE_ROOT/incoming_queue.json`；未设置时默认写入 `$EXTENSION_STORAGE_ROOT/agent-queue/incoming_queue.json`。
+The script writes `$AGENT_QUEUE_ROOT/incoming_queue.json`. When `AGENT_QUEUE_ROOT` is unset, the default is `$EXTENSION_STORAGE_ROOT/agent-queue/incoming_queue.json`.
 
 ---
 
@@ -141,7 +141,7 @@ Fix: run `npx playwright install chromium` separately.
 
 ### 5. Config File Path Was Wrong in the Agent Prompt
 
-The agent prompt must point at the extension artifact’s **`cli_config.json`** using a path that resolves correctly from the shell cwd (prefer an absolute path to `…/chrome-extension-analyzer/<id>/<version>/cli_config.json`).
+The agent prompt must reference **`cli_config.json`** with a path that resolves from the shell cwd (prefer an absolute path under `$AGENT_QUEUE_ROOT/extension-data/<id>/<version>/cli_config.json`).
 
 ---
 
@@ -166,7 +166,7 @@ The agent prompt must point at the extension artifact’s **`cli_config.json`** 
 # Ensure everything is set up
 npx playwright install chromium
 
-# Launch the agent (queue tasks; each run uses `<artifactRoot>/cli_config.json`)
+# Launch the agent (queue tasks; each run uses `$AGENT_QUEUE_ROOT/extension-data/<id>/<version>/cli_config.json`)
 node index.ts
 ```
 
@@ -175,7 +175,7 @@ Or launch the browser manually from an unpacked extension directory:
 ```bash
 playwright-cli close-all
 playwright-cli open \
-  --config=/absolute/path/to/chrome-extension-analyzer/<extensionId>/<version>/cli_config.json \
+  --config=/absolute/path/to/agent-queue/extension-data/<extensionId>/<version>/cli_config.json \
   --headed \
   --persistent \
   --profile=/path/to/your/playwright-profile

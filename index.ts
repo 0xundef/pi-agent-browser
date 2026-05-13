@@ -653,11 +653,11 @@ function writeDefaultCliConfigIfMissing(sidecarRootDir: string, unpackRootDir: s
 }
 
 /**
- * Prompt resolution: extension override first, then shared `$AGENT_QUEUE_ROOT/prompt.md`
- * (seeded from `resources/default-extension-test-prompt.md` when missing).
+ * Prompt resolution: extension override first (`$AGENT_QUEUE_ROOT/extension-data/<id>/prompt.md`),
+ * then shared `$AGENT_QUEUE_ROOT/prompt.md` (seeded from `resources/default-extension-test-prompt.md` when missing).
  */
 function resolveExtensionPromptPath(queueEntry: QueueEntry): string {
-  const extensionPrompt = path.join(EXTENSION_ANALYZER_ROOT, queueEntry.id, "prompt.md");
+  const extensionPrompt = path.join(AGENT_QUEUE_ROOT, EXTENSION_SIDE_DATA, queueEntry.id, "prompt.md");
   if (existsSync(extensionPrompt)) return extensionPrompt;
   syncAgentQueueDefaultPromptFromBundled();
   if (existsSync(AGENT_DEFAULT_PROMPT_PATH)) return AGENT_DEFAULT_PROMPT_PATH;
