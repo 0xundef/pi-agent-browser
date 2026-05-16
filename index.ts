@@ -1408,7 +1408,7 @@ async function main() {
 
   const eidNote = eidFilter ? ` Extension filter: eid=${eidFilter} (only this id from the queue).` : "";
   console.log(
-    `[${new Date().toISOString()}] Processing service started (prompt-driven agent + playwright-cli). Watching queue paths: ${uniquePaths.join(", ")}. Task hard timeout: ${taskTimeoutMs}ms (override via TASK_TIMEOUT_MS).${eidNote}`
+    `[${new Date().toISOString()}] Processing service started (prompt-driven agent + playwright-cli). Watching directory: ${queueDir} (file: ${queueBasename}). Task hard timeout: ${taskTimeoutMs}ms (override via TASK_TIMEOUT_MS).${eidNote}`
   );
 }
 
