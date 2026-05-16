@@ -1373,17 +1373,23 @@ async function main() {
   if (!existsSync(queueDir)) {
     mkdirSync(queueDir, { recursive: true });
   }
-  const uniquePaths = existsSync(AGENT_INCOMING_QUEUE_PATH) ? [AGENT_INCOMING_QUEUE_PATH] : [];
-  const watchers = uniquePaths.map((queuePath) =>
-    watch(queuePath, (eventType) => {
-      if (eventType === "change") {
-        console.log(`[${new Date().toISOString()}] Queue changed: ${queuePath}`);
-        tryProcessLatest().catch((e) => {
-          console.error(`[${new Date().toISOString()}] tryProcessLatest error: ${e?.message ?? String(e)}`);
-        });
-      }
-    })
-  );
+  const queueBasename = path.basename(AGENT_INCOMING_QUEUE_PATH);
+  const watchers: ReturnType<typeof watch>[] = [];
+
+  // Watch the parent directory so we can detect file creation/deletion/rename events.
+  // When incoming_queue.json is deleted and recreated, the old file-level watcher
+  // becomes stale (different inode). The directory watcher sees the "rename" event
+  // for recreation and lets us react accordingly.
+  const dirWatcher = watch(queueDir, (eventType, filename) => {
+    if (filename !== queueBasename) return;
+    if (eventType === "change" || eventType === "rename") {
+      console.log(`[${new Date().toISOString()}] Queue ${eventType}: ${AGENT_INCOMING_QUEUE_PATH}`);
+      tryProcessLatest().catch((e) => {
+        console.error(`[${new Date().toISOString()}] tryProcessLatest error: ${e?.message ?? String(e)}`);
+      });
+    }
+  });
+  watchers.push(dirWatcher);
 
   await tryProcessLatest();
   const pollTimer = setInterval(() => {
