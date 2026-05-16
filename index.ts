@@ -483,6 +483,25 @@ function loadIncomingQueue(): QueueEntryWithIncomingTime[] {
   return loadJson(AGENT_INCOMING_QUEUE_PATH, []);
 }
 
+// Remove a single processed entry from incoming_queue.json so that deleting
+// status.json (or any other operator action) does not resurrect already-handled
+// tasks. Matches by (id, version) plus runId or index, mirroring the
+// unhandledQueue filter elsewhere in this file.
+function removeFromIncomingQueue(target: QueueEntryWithIncomingTime) {
+  const queue = loadIncomingQueue();
+  const targetRunId = getQueueRunId(target);
+  const next = queue.filter((entry) => {
+    if (entry.id !== target.id || entry.version !== target.version) return true;
+    const entryRunId = getQueueRunId(entry);
+    if (targetRunId && entryRunId) return entryRunId !== targetRunId;
+    if (target.index !== undefined && entry.index !== undefined) return entry.index !== target.index;
+    return false; // same (id, version) with no distinguishing info -> drop
+  });
+  if (next.length !== queue.length) {
+    saveJson(AGENT_INCOMING_QUEUE_PATH, next);
+  }
+}
+
 function loadStatus(): StatusEntry[] {
   return loadJson(AGENT_STATUS_PATH, []);
 }
@@ -511,7 +530,16 @@ function updateStatus(
   const incomingTime = queueEntry?.incoming_time ?? queueEntry?.time;
   const durationSeconds = calculateDurationSeconds(incomingTime);
 
-  const idx = status.findIndex((s) => s.id === entry.id && s.version === entry.version);
+  // Match by (id, version) AND runId (or index fallback) so that concurrent
+  // runs for the same extension don't overwrite each other's status rows.
+  const matchesRun = (s: StatusEntry) => {
+    if (entry.runId || s.runId) return s.runId === entry.runId;
+    if (entry.index !== undefined || s.index !== undefined) return s.index === entry.index;
+    return true;
+  };
+  const idx = status.findIndex(
+    (s) => s.id === entry.id && s.version === entry.version && matchesRun(s),
+  );
   const nextEntry: StatusEntry = {
     ...(idx >= 0 ? status[idx] : {}),
     ...entry,
@@ -1346,6 +1374,7 @@ async function main() {
           { id: latest.id, version: latest.version, status: "complete", index: latest.index, runId: latestRunId, error: undefined },
           latest
         );
+        removeFromIncomingQueue(latest);
         console.log(`[${new Date().toISOString()}] Completed task: ${taskLabel}`);
       } catch (error: any) {
         const errorMessage = error?.message ?? String(error);
@@ -1356,6 +1385,7 @@ async function main() {
           { id: latest.id, version: latest.version, status: "error", index: latest.index, runId: latestRunId, error: errorMessage },
           latest
         );
+        removeFromIncomingQueue(latest);
         if (isTimeout) {
           console.error(
             `[${new Date().toISOString()}] Task TIMEOUT: ${taskLabel}, timeout=${taskTimeoutMs}ms, marked as error.`
