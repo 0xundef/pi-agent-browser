@@ -802,6 +802,39 @@ function resolveProfileDirectory(profileArg: string, shellCwd: string): string {
   return path.isAbsolute(profileArg) ? path.normalize(profileArg) : path.resolve(shellCwd, profileArg);
 }
 
+// Rewrites `playwright-cli screenshot --filename=<X>` so the file always lands in
+// `<sidecar>/ai_testing/<runId>/`. Without this, bare filenames resolve against
+// the shell's cwd (sidecar root) and the O'Armour UI's asset route, which looks
+// under `ai_testing/<runId>/`, returns 404 — producing broken thumbnails.
+function applyScreenshotPathGuard(
+  command: string,
+  sidecarDir: string,
+  runId: string,
+): string {
+  const screenshotRe = /(\bplaywright-cli\s+screenshot\b[^\n]*?--filename=)("([^"]+)"|'([^']+)'|(\S+))/g;
+  let touched = false;
+  const rewritten = command.replace(screenshotRe, (full, prefix, _arg, dq, sq, bare) => {
+    const value = (dq ?? sq ?? bare ?? "").trim();
+    if (!value) return full;
+    if (path.isAbsolute(value)) return full;
+    const basename = path.basename(value);
+    if (!basename) return full;
+    const newValue = `ai_testing/${runId}/${basename}`;
+    touched = true;
+    if (dq) return `${prefix}"${newValue}"`;
+    if (sq) return `${prefix}'${newValue}'`;
+    return `${prefix}${newValue}`;
+  });
+  if (touched) {
+    const runDir = path.join(sidecarDir, "ai_testing", runId);
+    if (!existsSync(runDir)) mkdirSync(runDir, { recursive: true });
+    console.log(
+      `[${new Date().toISOString()}] [shot-guard] rewrote screenshot --filename to ai_testing/${runId}/`,
+    );
+  }
+  return rewritten;
+}
+
 function applyPlaywrightOpenGuard(
   command: string,
   _unpackExtDir: string,
@@ -848,7 +881,8 @@ function createExtensionShellCommandTool(
           maybeClosePlaywrightCliSessionsBeforeOpen(shellCwd);
         }
         const guardedCommand = applyPlaywrightOpenGuard(params.command, extDir, sidecarDir, queueEntry, shellCwd);
-        const result = execSync(guardedCommand, {
+        const finalCommand = applyScreenshotPathGuard(guardedCommand, sidecarDir, getQueueRunId(queueEntry));
+        const result = execSync(finalCommand, {
           cwd: shellCwd,
           encoding: "utf8",
           maxBuffer: 1024 * 1024 * 10
