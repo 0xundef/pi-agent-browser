@@ -1,133 +1,187 @@
 import { execSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+
+const NETWORK_FILTER = process.env.AGENT_NETWORK_FILTER ?? "https?://";
+const NETWORK_CMD = `playwright-cli network --request-headers --filter=${JSON.stringify(NETWORK_FILTER)}`;
 
 export type NetworkRequestEntry = {
   method: string;
   url: string;
   status: number | null;
+  resourceType: "fetch" | "xhr" | "websocket";
+  requestedAt?: string;
   requestHeaders?: Record<string, string>;
 };
 
 export type NetworkLog = {
   capturedAt: string;
+  source: "playwright-cli network";
   filter: string;
+  resourceTypes: string[];
   requestCount: number;
   requests: NetworkRequestEntry[];
 };
 
-const REQUEST_LINE_RE = /^\[(\w+)\]\s+(.+?)\s+=>\s+\[(\d*)\]\s*$/;
+const STATIC_ASSET_RE = /\.(js|mjs|css|png|jpe?g|gif|svg|webp|woff2?|ttf|ico|map)(\?|$)/i;
 
-function parseHeaderBlock(lines: string[]): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const line of lines) {
-    const idx = line.indexOf(":");
-    if (idx <= 0) continue;
-    out[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim();
-  }
-  return out;
+function execInSidecar(sidecarDir: string, command: string): string {
+  return execSync(command, {
+    cwd: sidecarDir,
+    encoding: "utf8",
+    maxBuffer: 20 * 1024 * 1024,
+    timeout: 60_000,
+  });
 }
 
-/** Parses `playwright-cli network` text output into structured entries. */
-export function parsePlaywrightNetworkOutput(raw: string): NetworkRequestEntry[] {
-  const requests: NetworkRequestEntry[] = [];
+function inferResourceType(entry: {
+  method: string;
+  url: string;
+  requestHeaders?: Record<string, string>;
+}): NetworkRequestEntry["resourceType"] | null {
+  const url = entry.url.toLowerCase();
+  if (url.startsWith("ws://") || url.startsWith("wss://")) return "websocket";
+
+  if (STATIC_ASSET_RE.test(url)) return null;
+
+  const accept = (entry.requestHeaders?.accept ?? entry.requestHeaders?.Accept ?? "").toLowerCase();
+  const secFetchMode = (
+    entry.requestHeaders?.["sec-fetch-mode"] ?? entry.requestHeaders?.["Sec-Fetch-Mode"] ?? ""
+  ).toLowerCase();
+  const secFetchDest = (
+    entry.requestHeaders?.["sec-fetch-dest"] ?? entry.requestHeaders?.["Sec-Fetch-Dest"] ?? ""
+  ).toLowerCase();
+
+  if (secFetchMode === "websocket" || secFetchDest === "websocket") return "websocket";
+  if (secFetchMode === "cors" || secFetchMode === "no-cors") return "fetch";
+  if (accept.includes("application/json") || accept.includes("text/event-stream")) return "fetch";
+  if (["POST", "PUT", "PATCH", "DELETE"].includes(entry.method.toUpperCase())) return "fetch";
+  if (secFetchDest === "empty" || secFetchDest === "") return "fetch";
+  if (/\/(api|rpc|graphql)\b|\/v[0-9]+\//i.test(url)) return "fetch";
+
+  // Top-level document navigations (HTML) are not Fetch/XHR.
+  if (
+    entry.method.toUpperCase() === "GET" &&
+    (accept.includes("text/html") || secFetchDest === "document")
+  ) {
+    return null;
+  }
+
+  return "fetch";
+}
+
+/** Parses `playwright-cli network` text output. */
+export function parsePlaywrightNetworkOutput(stdout: string): NetworkRequestEntry[] {
+  const lines = stdout.split("\n");
+  const entries: NetworkRequestEntry[] = [];
   let current: NetworkRequestEntry | null = null;
   let inHeaders = false;
-  const headerLines: string[] = [];
 
-  const flushCurrent = () => {
+  const lineRe = /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(\S+)\s+=>\s+\[(\d+)\]\s*$/;
+  const linePendingRe = /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(\S+)\s+=>\s+\[\]\s*$/;
+
+  const pushCurrent = () => {
     if (!current) return;
-    if (inHeaders && headerLines.length > 0) {
-      current.requestHeaders = parseHeaderBlock(headerLines);
-    }
-    requests.push(current);
+    const type = inferResourceType(current);
+    if (type) entries.push({ ...current, resourceType: type });
     current = null;
     inHeaders = false;
-    headerLines.length = 0;
   };
 
-  for (const line of raw.split(/\r?\n/)) {
+  for (const raw of lines) {
+    const line = raw.trimEnd();
     const trimmed = line.trim();
-    if (!trimmed) {
-      if (inHeaders && headerLines.length > 0 && current) {
-        current.requestHeaders = parseHeaderBlock(headerLines);
-        headerLines.length = 0;
-        inHeaders = false;
-      }
-      continue;
-    }
+    if (!trimmed || trimmed.startsWith("###")) continue;
 
-    const match = REQUEST_LINE_RE.exec(trimmed);
+    const match = trimmed.match(lineRe);
     if (match) {
-      flushCurrent();
-      const statusRaw = match[3];
+      pushCurrent();
       current = {
-        method: match[1].toUpperCase(),
-        url: match[2].trim(),
-        status: statusRaw ? Number(statusRaw) : null,
+        method: match[1],
+        url: match[2],
+        status: Number(match[3]),
+        resourceType: "fetch",
+        requestHeaders: {},
       };
       continue;
     }
 
-    if (trimmed === "Request headers:" && current) {
+    const pending = trimmed.match(linePendingRe);
+    if (pending) {
+      pushCurrent();
+      current = {
+        method: pending[1],
+        url: pending[2],
+        status: null,
+        resourceType: "fetch",
+        requestHeaders: {},
+      };
+      continue;
+    }
+
+    if (trimmed === "Request headers:") {
       inHeaders = true;
       continue;
     }
 
-    if (inHeaders && current && trimmed.includes(":")) {
-      headerLines.push(trimmed);
+    if (inHeaders && current) {
+      const colon = trimmed.indexOf(":");
+      if (colon > 0) {
+        const key = trimmed.slice(0, colon).trim();
+        const value = trimmed.slice(colon + 1).trim();
+        current.requestHeaders ??= {};
+        current.requestHeaders[key] = value;
+      }
     }
   }
-
-  flushCurrent();
-  return requests;
+  pushCurrent();
+  return entries;
 }
 
-/**
- * Runs `playwright-cli network` and writes `ai_testing/<runId>/network.json` under the sidecar.
- * Non-fatal on failure (logs and returns null).
- */
-export function captureNetworkLog(params: {
+function runPlaywrightNetwork(sidecarDir: string): string {
+  try {
+    return execInSidecar(sidecarDir, NETWORK_CMD);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/unknown command:\s*network/i.test(message)) throw err;
+    const fallback = `playwright-cli requests --filter=${JSON.stringify(NETWORK_FILTER)}`;
+    return execInSidecar(sidecarDir, fallback);
+  }
+}
+
+/** Clears the in-session network list (call after browser open). */
+export function clearNetworkCapture(sidecarDir: string): void {
+  try {
+    execInSidecar(sidecarDir, "playwright-cli network --clear");
+  } catch {
+    // older CLI may not support --clear
+  }
+}
+
+/** Runs `playwright-cli network` and returns Fetch/XHR + WebSocket entries. */
+export function collectNetworkFromCli(sidecarDir: string): NetworkRequestEntry[] {
+  const stdout = runPlaywrightNetwork(sidecarDir);
+  return parsePlaywrightNetworkOutput(stdout);
+}
+
+/** Writes ai_testing/<runId>/network.json from playwright-cli network output. */
+export function saveNetworkCapture(params: {
   sidecarDir: string;
   runId: string;
-  filter?: string;
-}): string | null {
-  const filter =
-    params.filter?.trim() ||
-    process.env.AGENT_NETWORK_FILTER?.trim() ||
-    "https?://";
+}): { dest: string; count: number } {
+  const requests = collectNetworkFromCli(params.sidecarDir);
   const runDir = path.join(params.sidecarDir, "ai_testing", params.runId);
   mkdirSync(runDir, { recursive: true });
   const dest = path.join(runDir, "network.json");
 
-  try {
-    const raw = execSync(
-      `playwright-cli network --request-headers --filter=${JSON.stringify(filter)}`,
-      {
-        cwd: params.sidecarDir,
-        encoding: "utf8",
-        maxBuffer: 20 * 1024 * 1024,
-        timeout: 60_000,
-      }
-    );
-    const requests = parsePlaywrightNetworkOutput(raw);
-    const log: NetworkLog = {
-      capturedAt: new Date().toISOString(),
-      filter,
-      requestCount: requests.length,
-      requests,
-    };
-    writeFileSync(dest, `${JSON.stringify(log, null, 2)}\n`, "utf8");
-    console.log(
-      `[${new Date().toISOString()}] [network] saved ${requests.length} request(s) to ${dest}`
-    );
-    return dest;
-  } catch (e: unknown) {
-    const err = e as { stderr?: string; message?: string };
-    const hint = String(err.stderr ?? err.message ?? e).slice(0, 300);
-    console.log(
-      `[${new Date().toISOString()}] [network] capture non-fatal: ${hint || "(no output)"}`
-    );
-    return null;
-  }
+  const log: NetworkLog = {
+    capturedAt: new Date().toISOString(),
+    source: "playwright-cli network",
+    filter: NETWORK_FILTER,
+    resourceTypes: ["fetch", "xhr", "websocket"],
+    requestCount: requests.length,
+    requests,
+  };
+  writeFileSync(dest, `${JSON.stringify(log, null, 2)}\n`, "utf8");
+  return { dest, count: requests.length };
 }

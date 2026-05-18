@@ -17,7 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import * as bip39 from "bip39";
-import { captureNetworkLog } from "./lib/network-capture.js";
+import { clearNetworkCapture, saveNetworkCapture } from "./lib/network-capture.js";
 
 dotenv.config();
 dotenv.config({ path: path.resolve(process.cwd(), ".env.local") });
@@ -905,6 +905,65 @@ function createExtensionShellCommandTool(
   };
 }
 
+const emptyToolParameters = Type.Object({});
+
+function createStartNetworkCaptureTool(sidecarDir: string): AgentTool<typeof emptyToolParameters, any> {
+  return {
+    name: "start_network_capture",
+    label: "Start network capture",
+    description:
+      "Clears the playwright-cli in-session network log. Call right after `playwright-cli open` so only traffic from this test run is saved. Capture itself uses `playwright-cli network` when you call capture_network_traffic.",
+    parameters: emptyToolParameters,
+    async execute() {
+      try {
+        clearNetworkCapture(sidecarDir);
+        return {
+          content: [{ type: "text", text: "Network log cleared (playwright-cli network --clear)." }],
+          details: { ok: true }
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: "text", text: `ERROR: ${msg}` }],
+          details: { ok: false, error: msg }
+        };
+      }
+    }
+  };
+}
+
+function createCaptureNetworkTrafficTool(
+  sidecarDir: string,
+  runId: string
+): AgentTool<typeof emptyToolParameters, any> {
+  return {
+    name: "capture_network_traffic",
+    label: "Save captured network traffic",
+    description: `Runs playwright-cli network (--request-headers, https filter), keeps Fetch/XHR and WebSocket-like entries, writes ai_testing/${runId}/network.json. Call before validate_recordings.`,
+    parameters: emptyToolParameters,
+    async execute() {
+      try {
+        const { dest, count } = saveNetworkCapture({ sidecarDir, runId });
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Saved ${count} request(s) via playwright-cli network to ${dest}`
+            }
+          ],
+          details: { dest, count, ok: true }
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: "text", text: `ERROR: ${msg}` }],
+          details: { ok: false, error: msg }
+        };
+      }
+    }
+  };
+}
+
 function createExtensionValidateTool(sidecarDir: string, runId: string): AgentTool<typeof validateRecordingsParameters, any> {
   return {
     name: "validate_recordings",
@@ -1009,6 +1068,8 @@ async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime
         addTool,
         createExtensionShellCommandTool(extDir, dataDir, queueEntry),
         generateMnemonicTool,
+        createStartNetworkCaptureTool(dataDir),
+        createCaptureNetworkTrafficTool(dataDir, runId),
         createExtensionValidateTool(dataDir, runId),
         createExtensionRecordStepTool(dataDir, runId)
       ]
@@ -1098,8 +1159,6 @@ async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime
       throw new Error(agentError);
     }
     process.stdout.write("\n");
-  } finally {
-    captureNetworkLog({ sidecarDir: dataDir, runId });
   }
 }
 
