@@ -17,6 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import * as bip39 from "bip39";
+import { captureNetworkLog } from "./lib/network-capture.js";
 
 dotenv.config();
 dotenv.config({ path: path.resolve(process.cwd(), ".env.local") });
@@ -1091,11 +1092,15 @@ async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime
     }
   });
 
-  await agent.prompt(prompt);
-  if (agentError) {
-    throw new Error(agentError);
+  try {
+    await agent.prompt(prompt);
+    if (agentError) {
+      throw new Error(agentError);
+    }
+    process.stdout.write("\n");
+  } finally {
+    captureNetworkLog({ sidecarDir: dataDir, runId });
   }
-  process.stdout.write("\n");
 }
 
 // ==================== Main ====================
