@@ -41,6 +41,7 @@ function inferResourceType(entry: {
 }): NetworkRequestEntry["resourceType"] | null {
   const url = entry.url.toLowerCase();
   if (url.startsWith("ws://") || url.startsWith("wss://")) return "websocket";
+  if (url.startsWith("chrome-extension://")) return null;
 
   if (STATIC_ASSET_RE.test(url)) return null;
 
@@ -70,14 +71,32 @@ function inferResourceType(entry: {
   return "fetch";
 }
 
+/** Unwrap CLI stdout (plain text, ### Result section, or JSON `{ "result": "..." }`). */
+export function extractNetworkCliText(stdout: string): string {
+  const trimmed = stdout.trim();
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as { result?: unknown };
+      if (typeof parsed.result === "string") return parsed.result;
+    } catch {
+      // fall through
+    }
+  }
+  const resultSection = trimmed.match(/### Result\s*\n([\s\S]*?)(?:\n### |\n*$)/);
+  if (resultSection?.[1]) return resultSection[1].trim();
+  return stdout;
+}
+
 /** Parses `playwright-cli network` text output. */
 export function parsePlaywrightNetworkOutput(stdout: string): NetworkRequestEntry[] {
-  const lines = stdout.split("\n");
+  const text = extractNetworkCliText(stdout);
+  const lines = text.split("\n");
   const entries: NetworkRequestEntry[] = [];
   let current: NetworkRequestEntry | null = null;
   let inHeaders = false;
 
-  const lineRe = /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(\S+)\s+=>\s+\[(\d+)\]\s*$/;
+  // Status may be `[200]` or `[200] OK` depending on playwright-cli version.
+  const lineRe = /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(\S+)\s+=>\s+\[(\d+)\](?:\s+\S+)?\s*$/;
   const linePendingRe = /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(\S+)\s+=>\s+\[\]\s*$/;
 
   const pushCurrent = () => {
@@ -92,6 +111,7 @@ export function parsePlaywrightNetworkOutput(stdout: string): NetworkRequestEntr
     const line = raw.trimEnd();
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("###")) continue;
+    if (trimmed.startsWith("Note:")) continue;
 
     const match = trimmed.match(lineRe);
     if (match) {
