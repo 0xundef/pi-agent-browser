@@ -13,6 +13,7 @@ You are driving **playwright-cli** (and related shell tools) to smoke-test an **
 5. **Network traffic (Fetch/XHR + WebSocket only):**
    - Right after the first successful `playwright-cli open`, call **`start_network_capture`** (clears the playwright-cli network log).
    - Before **`validate_recordings`**, call **`capture_network_traffic`** (runs `playwright-cli network --request-headers --filter="https?://"` and saves **`ai_testing/<runId>/network.json`**).
+   - **Always call `capture_network_traffic` even if you saw no API traffic** — zero requests is OK; the file must still exist with `"requests": []`.
 
 ## Rules
 
@@ -23,4 +24,4 @@ You are driving **playwright-cli** (and related shell tools) to smoke-test an **
 
 ## Done when
 
-You have a short summary of what was reachable, at least one screenshot-backed step in `recordings.json`, and validation passes—or a clear explanation of a blocking error (missing UI, blocked host permission, etc.).
+You have a short summary of what was reachable, at least one screenshot-backed step in `recordings.json`, **`network.json` present under `ai_testing/<runId>/`** (empty `requests` array is valid), and validation passes—or a clear explanation of a blocking error (missing UI, blocked host permission, etc.).

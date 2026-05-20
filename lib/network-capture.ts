@@ -184,7 +184,7 @@ export function collectNetworkFromCli(sidecarDir: string): NetworkRequestEntry[]
   return parsePlaywrightNetworkOutput(stdout);
 }
 
-/** Writes ai_testing/<runId>/network.json from playwright-cli network output. */
+/** Writes ai_testing/<runId>/network.json from playwright-cli network output (requests may be empty). */
 export function saveNetworkCapture(params: {
   sidecarDir: string;
   runId: string;
