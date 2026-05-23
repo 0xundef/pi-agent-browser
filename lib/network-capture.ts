@@ -9,7 +9,8 @@ export type NetworkRequestEntry = {
   method: string;
   url: string;
   status: number | null;
-  resourceType: "fetch" | "xhr" | "websocket";
+  /** Optional hint for UI; not used for filtering. */
+  resourceType?: "fetch" | "xhr" | "websocket";
   requestedAt?: string;
   requestHeaders?: Record<string, string>;
 };
@@ -18,12 +19,16 @@ export type NetworkLog = {
   capturedAt: string;
   source: "playwright-cli network";
   filter: string;
+  /** Exclusions applied when saving (not playwright-cli filter). */
   resourceTypes: string[];
   requestCount: number;
   requests: NetworkRequestEntry[];
 };
 
-const STATIC_ASSET_RE = /\.(js|mjs|css|png|jpe?g|gif|svg|webp|woff2?|ttf|ico|map)(\?|$)/i;
+/** Drop extension-internal URLs only; all other playwright-cli matches are kept. */
+function shouldIncludeNetworkUrl(url: string): boolean {
+  return !url.toLowerCase().startsWith("chrome-extension://");
+}
 
 function execInSidecar(sidecarDir: string, command: string): string {
   return execSync(command, {
@@ -32,43 +37,6 @@ function execInSidecar(sidecarDir: string, command: string): string {
     maxBuffer: 20 * 1024 * 1024,
     timeout: 60_000,
   });
-}
-
-function inferResourceType(entry: {
-  method: string;
-  url: string;
-  requestHeaders?: Record<string, string>;
-}): NetworkRequestEntry["resourceType"] | null {
-  const url = entry.url.toLowerCase();
-  if (url.startsWith("ws://") || url.startsWith("wss://")) return "websocket";
-  if (url.startsWith("chrome-extension://")) return null;
-
-  if (STATIC_ASSET_RE.test(url)) return null;
-
-  const accept = (entry.requestHeaders?.accept ?? entry.requestHeaders?.Accept ?? "").toLowerCase();
-  const secFetchMode = (
-    entry.requestHeaders?.["sec-fetch-mode"] ?? entry.requestHeaders?.["Sec-Fetch-Mode"] ?? ""
-  ).toLowerCase();
-  const secFetchDest = (
-    entry.requestHeaders?.["sec-fetch-dest"] ?? entry.requestHeaders?.["Sec-Fetch-Dest"] ?? ""
-  ).toLowerCase();
-
-  if (secFetchMode === "websocket" || secFetchDest === "websocket") return "websocket";
-  if (secFetchMode === "cors" || secFetchMode === "no-cors") return "fetch";
-  if (accept.includes("application/json") || accept.includes("text/event-stream")) return "fetch";
-  if (["POST", "PUT", "PATCH", "DELETE"].includes(entry.method.toUpperCase())) return "fetch";
-  if (secFetchDest === "empty" || secFetchDest === "") return "fetch";
-  if (/\/(api|rpc|graphql)\b|\/v[0-9]+\//i.test(url)) return "fetch";
-
-  // Top-level document navigations (HTML) are not Fetch/XHR.
-  if (
-    entry.method.toUpperCase() === "GET" &&
-    (accept.includes("text/html") || secFetchDest === "document")
-  ) {
-    return null;
-  }
-
-  return "fetch";
 }
 
 /** Unwrap CLI stdout (plain text, ### Result section, or JSON `{ "result": "..." }`). */
@@ -101,8 +69,15 @@ export function parsePlaywrightNetworkOutput(stdout: string): NetworkRequestEntr
 
   const pushCurrent = () => {
     if (!current) return;
-    const type = inferResourceType(current);
-    if (type) entries.push({ ...current, resourceType: type });
+    if (!shouldIncludeNetworkUrl(current.url)) {
+      current = null;
+      inHeaders = false;
+      return;
+    }
+    const url = current.url.toLowerCase();
+    const resourceType: NetworkRequestEntry["resourceType"] | undefined =
+      url.startsWith("ws://") || url.startsWith("wss://") ? "websocket" : undefined;
+    entries.push({ ...current, ...(resourceType ? { resourceType } : {}) });
     current = null;
     inHeaders = false;
   };
@@ -120,7 +95,6 @@ export function parsePlaywrightNetworkOutput(stdout: string): NetworkRequestEntr
         method: match[1],
         url: match[2],
         status: Number(match[3]),
-        resourceType: "fetch",
         requestHeaders: {},
       };
       continue;
@@ -133,7 +107,6 @@ export function parsePlaywrightNetworkOutput(stdout: string): NetworkRequestEntr
         method: pending[1],
         url: pending[2],
         status: null,
-        resourceType: "fetch",
         requestHeaders: {},
       };
       continue;
@@ -178,7 +151,7 @@ export function clearNetworkCapture(sidecarDir: string): void {
   }
 }
 
-/** Runs `playwright-cli network` and returns Fetch/XHR + WebSocket entries. */
+/** Runs `playwright-cli network` and returns entries (excludes chrome-extension:// only). */
 export function collectNetworkFromCli(sidecarDir: string): NetworkRequestEntry[] {
   const stdout = runPlaywrightNetwork(sidecarDir);
   return parsePlaywrightNetworkOutput(stdout);
@@ -198,7 +171,7 @@ export function saveNetworkCapture(params: {
     capturedAt: new Date().toISOString(),
     source: "playwright-cli network",
     filter: NETWORK_FILTER,
-    resourceTypes: ["fetch", "xhr", "websocket"],
+    resourceTypes: ["all-except-chrome-extension"],
     requestCount: requests.length,
     requests,
   };

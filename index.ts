@@ -939,7 +939,7 @@ function createCaptureNetworkTrafficTool(
   return {
     name: "capture_network_traffic",
     label: "Save captured network traffic",
-    description: `Runs playwright-cli network (--request-headers, https filter), keeps Fetch/XHR and WebSocket-like entries, writes ai_testing/${runId}/network.json. Call before validate_recordings.`,
+    description: `Runs playwright-cli network (--request-headers, https filter), saves all matching requests except chrome-extension://, writes ai_testing/${runId}/network.json. Call before validate_recordings.`,
     parameters: emptyToolParameters,
     async execute() {
       try {
