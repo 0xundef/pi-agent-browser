@@ -1153,13 +1153,11 @@ async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime
     }
   });
 
-  try {
-    await agent.prompt(prompt);
-    if (agentError) {
-      throw new Error(agentError);
-    }
-    process.stdout.write("\n");
+  await agent.prompt(prompt);
+  if (agentError) {
+    throw new Error(agentError);
   }
+  process.stdout.write("\n");
 }
 
 // ==================== Main ====================
