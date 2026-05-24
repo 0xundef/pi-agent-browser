@@ -997,10 +997,15 @@ function createExtensionRecordStepTool(sidecarDir: string, runId: string): Agent
         }
       }
       
+      let image = params.image.replace(/^\/+/, "");
+      const sidecarRelativePrefix = `ai_testing/${runId}/`;
+      if (image.startsWith(sidecarRelativePrefix)) {
+        image = image.slice(sidecarRelativePrefix.length);
+      }
       entries.push({
         time: params.time,
         thinking: params.thinking,
-        image: params.image
+        image
       });
       writeFileSync(dataPath, JSON.stringify(entries, null, 2));
       return {
