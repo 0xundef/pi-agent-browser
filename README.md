@@ -31,9 +31,8 @@ npm run dev
 
 | Path | Purpose |
 |---|---|
-| `index.ts` | Main prompt-driven processing service entry |
-| `$AGENT_QUEUE_ROOT/incoming_queue.json` | Queue source (defaults to `$EXTENSION_STORAGE_ROOT/agent-queue/incoming_queue.json`) |
-| `$AGENT_QUEUE_ROOT/status.json` | Primary processing state |
+| `index.ts` | Main entry: HTTP control plane + AI test executor |
+| `$AGENT_QUEUE_ROOT/status.json` | Run state written by the agent (OArmour syncs this into Postgres) |
 | `.env` (from `.env.example`) | AI provider credentials and model (`PI_*`, `ANTHROPIC_*`, `OPENAI_*`); loaded via `dotenv` |
 | `config/pi-agent.config.json` | Optional JSON provider config (same shape as before); use `PI_CONFIG` to point elsewhere |
 | `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<extensionId>/<version>/` | Unpacked extension exact version directory |
@@ -41,12 +40,11 @@ npm run dev
 | `$AGENT_QUEUE_ROOT/prompt.md` | **Default prompt** for all extensions; OArmour seeds this from its bundled template on enqueue; locally, `resources/default-extension-test-prompt.md` is copied here if missing |
 | `$AGENT_QUEUE_ROOT/extension-data/<extensionId>/<version>/cli_config.json` | Runtime config; **auto-created** if missing (`chromium`, `headless` default true, `userDataDir` defaults to `<sidecar>/.playwright-profile`, `--no-sandbox` / `--disable-setuid-sandbox`, `--load-extension` points at unpacked extension under `chrome-extension-analyzer`) |
 | `$AGENT_QUEUE_ROOT/extension-data/<extensionId>/<version>/ai_testing/<runId>/` | Agent execution artifacts (`recordings.json` and screenshots) |
-| `scripts/enqueue-task.ts` | Simulate external system queue push |
+| `scripts/enqueue-task.ts` | Local dev helper: `POST /v1/sessions` to a running agent |
 
 ### Queue and Status Fields
 
-- `$AGENT_QUEUE_ROOT/incoming_queue.json`
-  - `incoming_time`: queue entry creation time in ISO 8601 format
+- OArmour Postgres `BrowserAgentTask` — dispatch queue (not stored on the agent disk).
 - `$AGENT_QUEUE_ROOT/status.json`
   - `status_time`: last status update time in ISO 8601 format
   - `duration`: elapsed seconds from `incoming_time` to current status update
@@ -54,12 +52,12 @@ npm run dev
 
 ---
 
-## Processing Flow (Prompt-Agent + Playwright CLI)
+## Processing Flow (HTTP dispatch + Playwright CLI)
 
-`node index.ts` starts a long-running service. Core behavior:
+`npm run dev` starts a long-running **stateless executor** with an HTTP control plane (default port `8791`). OArmour owns the task queue in Postgres; this service only runs tasks dispatched via HTTP.
 
-1. Tasks are read from `incoming_queue.json` only while the service is **idle** (not already running a job).
-2. Each pick takes the **newest** queue entry (`incoming_time`, then `index` if tied).
+1. OArmour inserts a task in `BrowserAgentTask` (status `QUEUED`), then `POST`s to `/v1/sessions` with `{ extensionId, version, sessionId }`.
+2. The agent accepts when a concurrency slot is free (default **1**, override with `BROWSER_AGENT_MAX_CONCURRENT`); returns **429** when at capacity.
 3. Processing validates the expected layout:
    - `$EXTENSION_STORAGE_ROOT/chrome-extension-analyzer/<id>/<version>/` must exist (unpacked extension).
    - `$AGENT_QUEUE_ROOT/extension-data/<id>/<version>/cli_config.json` is created if missing (`chromium`; default `userDataDir` is `<sidecar>/.playwright-profile`; override with `PLAYWRIGHT_CLI_USER_DATA_DIR`; headless by default, set `PLAYWRIGHT_CLI_HEADLESS=0` to disable).
@@ -84,13 +82,9 @@ npm run dev
 npm run dev
 ```
 
-**Run only one extension (optional):** pass `--eid` so the service only picks queue rows whose `id` matches (other extensions in the queue are ignored until you restart without the flag).
+**Run only one extension (optional):** legacy `--eid` filter is no longer used in HTTP dispatch mode.
 
-```bash
-npm run dev -- --eid nkbihfbeogaeaoehlefnkodbefgpgknn
-```
-
-**Direct run (no queue):** pass `--run-extension <id>` to run one AI session immediately from unpacked files under `chrome-extension-analyzer/<id>/`, then **exit**. Does not read `incoming_queue.json` or start queue file watchers. Still writes `status.json` and uses the same timeout (`TASK_TIMEOUT_MS`). If `--version` is omitted, the newest version folder under that id (by directory mtime) is chosen.
+**Direct run (no HTTP):** pass `--run-extension <id>` to run one AI session immediately from unpacked files under `chrome-extension-analyzer/<id>/`, then **exit**. Still writes `status.json` and uses the same timeout (`TASK_TIMEOUT_MS`). If `--version` is omitted, the newest version folder under that id (by directory mtime) is chosen.
 
 ```bash
 npm run dev -- --run-extension nkbihfbeogaeaoehlefnkodbefgpgknn
@@ -100,19 +94,19 @@ npm run dev -- --run-extension nkbihfbeogaeaoehlefnkodbefgpgknn --artifact-root 
 
 Shorthand: `--run <id>` or `--run-extension=<id>`. With `--run-extension`, `--eid` is ignored.
 
-### Simulate External Queue Push
+### Dispatch a Task Locally (dev)
 
-Use the standalone script to mimic an external enqueue (keeps `index.ts` unchanged):
+With `npm run dev` running, POST a session to the control plane:
 
 ```bash
-# Enqueue one task with default fields
+# Default extension/version; uses BROWSER_AGENT_API_URL or http://127.0.0.1:8791
 npm run enqueue:task
 
-# Custom fields
-npm run enqueue:task -- --id nkbihfbeogaeaoehlefnkodbefgpgknn --name MetaMask --version 12.17.3_0 --index 1001
+# Custom fields (--run-id / --session-id must match OArmour sessionId when testing end-to-end)
+npm run enqueue:task -- --id nkbihfbeogaeaoehlefnkodbefgpgknn --name MetaMask --version 12.17.3_0 --session-id 20260523120000-nkbihfbe-12.17.3_0
 ```
 
-The script writes `$AGENT_QUEUE_ROOT/incoming_queue.json`. When `AGENT_QUEUE_ROOT` is unset, the default is `$EXTENSION_STORAGE_ROOT/agent-queue/incoming_queue.json`.
+Production enqueue goes through OArmour Admin → Browser Agent or the monitor pipeline (Postgres queue + HTTP dispatch).
 
 ---
 

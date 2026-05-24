@@ -10,7 +10,6 @@ import {
   renameSync,
   rmSync,
   statSync,
-  watch,
   writeFileSync
 } from "node:fs";
 import os from "node:os";
@@ -18,6 +17,8 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import * as bip39 from "bip39";
 import { clearNetworkCapture, saveNetworkCapture } from "./lib/network-capture.js";
+import { maybeStartControlPlaneServer } from "./lib/control-plane-server.js";
+import { registerRunExecutor, isSessionCancelled, type RunRequest } from "./lib/run-coordinator.js";
 
 dotenv.config();
 dotenv.config({ path: path.resolve(process.cwd(), ".env.local") });
@@ -429,7 +430,6 @@ const EXTENSION_ANALYZER_ROOT = path.join(extensionStorageRoot, EXTENSION_ANALYZ
 const AGENT_QUEUE_ROOT = process.env.AGENT_QUEUE_ROOT?.trim()
   ? path.resolve(process.env.AGENT_QUEUE_ROOT.trim())
   : path.join(extensionStorageRoot, AGENT_QUEUE_DIR);
-const AGENT_INCOMING_QUEUE_PATH = path.join(AGENT_QUEUE_ROOT, "incoming_queue.json");
 const AGENT_STATUS_PATH = path.join(AGENT_QUEUE_ROOT, "status.json");
 const AGENT_DEFAULT_PROMPT_PATH = path.join(AGENT_QUEUE_ROOT, "prompt.md");
 
@@ -478,29 +478,6 @@ function saveJson(filePath: string, data: unknown) {
   const tmpPath = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
   writeFileSync(tmpPath, `${JSON.stringify(data, null, 2)}\n`);
   renameSync(tmpPath, filePath);
-}
-
-function loadIncomingQueue(): QueueEntryWithIncomingTime[] {
-  return loadJson(AGENT_INCOMING_QUEUE_PATH, []);
-}
-
-// Remove a single processed entry from incoming_queue.json so that deleting
-// status.json (or any other operator action) does not resurrect already-handled
-// tasks. Matches by (id, version) plus runId or index, mirroring the
-// unhandledQueue filter elsewhere in this file.
-function removeFromIncomingQueue(target: QueueEntryWithIncomingTime) {
-  const queue = loadIncomingQueue();
-  const targetRunId = getQueueRunId(target);
-  const next = queue.filter((entry) => {
-    if (entry.id !== target.id || entry.version !== target.version) return true;
-    const entryRunId = getQueueRunId(entry);
-    if (targetRunId && entryRunId) return entryRunId !== targetRunId;
-    if (target.index !== undefined && entry.index !== undefined) return entry.index !== target.index;
-    return false; // same (id, version) with no distinguishing info -> drop
-  });
-  if (next.length !== queue.length) {
-    saveJson(AGENT_INCOMING_QUEUE_PATH, next);
-  }
 }
 
 function loadStatus(): StatusEntry[] {
@@ -571,22 +548,6 @@ function updateStatus(
   else status.push(nextEntry);
   saveStatus(status);
   return status;
-}
-
-function parseIncomingTime(value?: string): number {
-  if (!value) return 0;
-  const ms = Date.parse(value);
-  return Number.isNaN(ms) ? 0 : ms;
-}
-
-function pickLatestQueueEntry(queue: QueueEntryWithIncomingTime[]): QueueEntryWithIncomingTime | undefined {
-  if (queue.length === 0) return undefined;
-  const sorted = [...queue].sort((a, b) => {
-    const timeDiff = parseIncomingTime(b.incoming_time ?? b.time) - parseIncomingTime(a.incoming_time ?? a.time);
-    if (timeDiff !== 0) return timeDiff;
-    return getQueueIndex(b) - getQueueIndex(a);
-  });
-  return sorted[0];
 }
 
 function getQueueIndex(queueEntry: QueueEntry): number {
@@ -1160,6 +1121,71 @@ async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime
   process.stdout.write("\n");
 }
 
+async function executeRunForCoordinator(request: RunRequest): Promise<void> {
+  const runtime = resolveRuntimeConfig(loadFileConfig());
+  const taskTimeoutMs = resolveTaskTimeoutMs();
+  const queueEntry: QueueEntryWithIncomingTime = {
+    id: request.extensionId,
+    version: request.version,
+    runId: request.sessionId,
+    index: Date.parse(request.incomingTime) || Date.now(),
+    incoming_time: request.incomingTime,
+    name: request.extensionName ?? undefined,
+    reason: "api_dispatch"
+  };
+
+  if (isSessionCancelled(request.sessionId)) {
+    updateStatus(
+      loadStatus(),
+      { id: request.extensionId, version: request.version, status: "error", runId: request.sessionId, index: queueEntry.index, error: "Cancelled before start" },
+      queueEntry
+    );
+    return;
+  }
+
+  let status = loadStatus();
+  status = updateStatus(
+    status,
+    { id: request.extensionId, version: request.version, status: "running", runId: request.sessionId, index: queueEntry.index, error: undefined },
+    queueEntry
+  );
+
+  const taskLabel = `id=${request.extensionId}, runId=${request.sessionId}`;
+  try {
+    await runWithTimeout(runExtensionAgent(queueEntry, runtime), taskTimeoutMs, taskLabel);
+    if (isSessionCancelled(request.sessionId)) {
+      status = loadStatus();
+      updateStatus(
+        status,
+        { id: request.extensionId, version: request.version, status: "error", runId: request.sessionId, index: queueEntry.index, error: "Cancelled by operator" },
+        queueEntry
+      );
+      return;
+    }
+    status = loadStatus();
+    updateStatus(
+      status,
+      { id: request.extensionId, version: request.version, status: "complete", runId: request.sessionId, index: queueEntry.index, error: undefined },
+      queueEntry
+    );
+    console.log(`[${new Date().toISOString()}] Completed task: ${taskLabel}`);
+  } catch (error: any) {
+    const errorMessage = error?.message ?? String(error);
+    const isTimeout = typeof errorMessage === "string" && errorMessage.startsWith("Task timed out after");
+    status = loadStatus();
+    updateStatus(
+      status,
+      { id: request.extensionId, version: request.version, status: "error", runId: request.sessionId, index: queueEntry.index, error: errorMessage },
+      queueEntry
+    );
+    if (isTimeout) {
+      console.error(`[${new Date().toISOString()}] Task TIMEOUT: ${taskLabel}, timeout=${taskTimeoutMs}ms`);
+    } else {
+      console.error(`[${new Date().toISOString()}] Failed task: ${taskLabel}, error=${errorMessage}`);
+    }
+  }
+}
+
 // ==================== Main ====================
 
 const DEFAULT_TASK_TIMEOUT_MS = 10 * 60 * 1000; // 10 分钟
@@ -1406,136 +1432,20 @@ async function main() {
     return;
   }
 
-  let isProcessing = false;
-  const eidFilter = devCli.extensionIdFilter;
+  registerRunExecutor(executeRunForCoordinator);
+  const controlPlane = maybeStartControlPlaneServer();
 
-  async function tryProcessLatest() {
-    if (isProcessing) {
-      if (agentQueueDebugLogsEnabled()) {
-        console.log(`[${new Date().toISOString()}] Service busy, skip pick.`);
-      }
-      return;
-    }
-    isProcessing = true;
-    try {
-      const queue = loadIncomingQueue();
-      const scopedQueue = eidFilter ? queue.filter((e) => e.id === eidFilter) : queue;
-      let status = loadStatus();
-      const unhandledQueue = scopedQueue.filter((entry) => {
-        const entryRunId = getQueueRunId(entry);
-        const entryStatus = status.find(
-          (s) =>
-            s.id === entry.id &&
-            s.version === entry.version &&
-            (s.runId === entryRunId || s.index === entry.index)
-        );
-        return !entryStatus || (entryStatus.status !== "running" && entryStatus.status !== "complete");
-      });
-      const latest = pickLatestQueueEntry(unhandledQueue);
-      if (!latest) {
-        return;
-      }
-
-      const latestStatus = status.find((s) => s.id === latest.id && s.version === latest.version);
-      const latestRunId = getQueueRunId(latest);
-      if (
-        latestStatus &&
-        (latestStatus.runId === latestRunId || latestStatus.index === latest.index) &&
-        (latestStatus.status === "running" || latestStatus.status === "complete")
-      ) {
-        console.log(`[${new Date().toISOString()}] Latest already handled (id=${latest.id}, runId=${latestRunId}, status=${latestStatus.status}).`);
-        return;
-      }
-
-      console.log(`[${new Date().toISOString()}] Pick latest task (idle -> running): id=${latest.id}, version=${latest.version}, runId=${latestRunId}`);
-      status = updateStatus(
-        status,
-        { id: latest.id, version: latest.version, status: "running", index: latest.index, runId: latestRunId, error: undefined },
-        latest
-      );
-
-      const taskLabel = `id=${latest.id}, runId=${latestRunId}`;
-      try {
-        console.log(
-          `[${new Date().toISOString()}] Prompt-driven flow: runExtensionAgent (${taskLabel}, timeout=${taskTimeoutMs}ms)`
-        );
-        await runWithTimeout(
-          runExtensionAgent(latest, runtime),
-          taskTimeoutMs,
-          taskLabel
-        );
-        status = loadStatus();
-        updateStatus(
-          status,
-          { id: latest.id, version: latest.version, status: "complete", index: latest.index, runId: latestRunId, error: undefined },
-          latest
-        );
-        removeFromIncomingQueue(latest);
-        console.log(`[${new Date().toISOString()}] Completed task: ${taskLabel}`);
-      } catch (error: any) {
-        const errorMessage = error?.message ?? String(error);
-        const isTimeout = typeof errorMessage === "string" && errorMessage.startsWith("Task timed out after");
-        status = loadStatus();
-        updateStatus(
-          status,
-          { id: latest.id, version: latest.version, status: "error", index: latest.index, runId: latestRunId, error: errorMessage },
-          latest
-        );
-        removeFromIncomingQueue(latest);
-        if (isTimeout) {
-          console.error(
-            `[${new Date().toISOString()}] Task TIMEOUT: ${taskLabel}, timeout=${taskTimeoutMs}ms, marked as error.`
-          );
-        } else {
-          console.error(`[${new Date().toISOString()}] Failed task: ${taskLabel}, error=${errorMessage}`);
-        }
-      }
-    } finally {
-      isProcessing = false;
-    }
-  }
-
-  const queueDir = path.dirname(AGENT_INCOMING_QUEUE_PATH);
-  if (!existsSync(queueDir)) {
-    mkdirSync(queueDir, { recursive: true });
-  }
-  const queueBasename = path.basename(AGENT_INCOMING_QUEUE_PATH);
-  const watchers: ReturnType<typeof watch>[] = [];
-
-  // Watch the parent directory so we can detect file creation/deletion/rename events.
-  // When incoming_queue.json is deleted and recreated, the old file-level watcher
-  // becomes stale (different inode). The directory watcher sees the "rename" event
-  // for recreation and lets us react accordingly.
-  const dirWatcher = watch(queueDir, (eventType, filename) => {
-    if (filename !== queueBasename) return;
-    if (eventType === "change" || eventType === "rename") {
-      console.log(`[${new Date().toISOString()}] Queue ${eventType}: ${AGENT_INCOMING_QUEUE_PATH}`);
-      tryProcessLatest().catch((e) => {
-        console.error(`[${new Date().toISOString()}] tryProcessLatest error: ${e?.message ?? String(e)}`);
-      });
-    }
-  });
-  watchers.push(dirWatcher);
-
-  await tryProcessLatest();
-  const pollTimer = setInterval(() => {
-    tryProcessLatest().catch((e) => {
-      console.error(`[${new Date().toISOString()}] Polling error: ${e?.message ?? String(e)}`);
-    });
-  }, 3000);
+  console.log(
+    `[${new Date().toISOString()}] Browser agent service ready (HTTP dispatch only; no local queue). Task hard timeout: ${taskTimeoutMs}ms (override via TASK_TIMEOUT_MS).`
+  );
 
   process.on("SIGINT", () => {
-    for (const watcher of watchers) {
-      watcher.close();
+    if (controlPlane) {
+      controlPlane.close(() => process.exit(0));
+      return;
     }
-    clearInterval(pollTimer);
     process.exit(0);
   });
-
-  const eidNote = eidFilter ? ` Extension filter: eid=${eidFilter} (only this id from the queue).` : "";
-  console.log(
-    `[${new Date().toISOString()}] Processing service started (prompt-driven agent + playwright-cli). Watching directory: ${queueDir} (file: ${queueBasename}). Task hard timeout: ${taskTimeoutMs}ms (override via TASK_TIMEOUT_MS).${eidNote}`
-  );
 }
 
 await main();
