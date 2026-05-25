@@ -25,6 +25,12 @@ import {
   isFinalizeRequested,
 } from "./lib/run-shell-tracker.js";
 import { resolveTaskFinalizeTimeoutMs } from "./lib/run-artifacts-finalize.js";
+import { logError, logInfo, logWarn } from "./lib/app-logger.js";
+import {
+  agentDebugEventsEnabled,
+  agentThinkingLogsEnabled,
+  agentToolLogsEnabled,
+} from "./lib/log-flags.js";
 import { runWithTimeoutAndFinalize } from "./lib/run-timeout.js";
 
 dotenv.config();
@@ -609,30 +615,6 @@ function resolveHeadlessForDefaultCliConfig(): boolean {
   return !/^0|false|no|off$/i.test(String(raw).trim());
 }
 
-/**
- * Tool I/O banners only. Does not affect model thinking (`AGENT_LOG_THINKING`) or `DEBUG_AGENT`.
- * Set `AGENT_LOG_TOOLS=0` (or `false` / `no` / `off`) to hide [TOOL CALL] / [TOOL RESULT].
- */
-function agentToolLogsEnabled(): boolean {
-  const raw = process.env.AGENT_LOG_TOOLS;
-  if (raw === undefined || String(raw).trim() === "") return true;
-  return !/^0|false|no|off$/i.test(String(raw).trim());
-}
-
-/** Default on; set `AGENT_LOG_THINKING=0` to hide streamed thinking on stderr. Independent of `AGENT_LOG_TOOLS`. */
-function agentThinkingLogsEnabled(): boolean {
-  const raw = process.env.AGENT_LOG_THINKING;
-  if (raw === undefined || String(raw).trim() === "") return true;
-  return !/^0|false|no|off$/i.test(String(raw).trim());
-}
-
-/** Default off. Set `AGENT_DEBUG_QUEUE=1` to log when the poller skips a pick because a task is already running. */
-function agentQueueDebugLogsEnabled(): boolean {
-  const raw = process.env.AGENT_DEBUG_QUEUE;
-  if (raw === undefined || String(raw).trim() === "") return false;
-  return !/^0|false|no|off$/i.test(String(raw).trim());
-}
-
 /** Default cli_config matches known-good MetaMask setup: chromium, headless, userDataDir, no sandbox. */
 function buildDefaultCliConfigPayload(extensionUnpackAbs: string, sidecarRootAbs: string) {
   const abs = path.resolve(extensionUnpackAbs);
@@ -668,7 +650,7 @@ function writeDefaultCliConfigIfMissing(sidecarRootDir: string, unpackRootDir: s
   const tmpPath = path.join(dir, `.cli_config.json.${process.pid}.${Date.now()}.tmp`);
   writeFileSync(tmpPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   renameSync(tmpPath, dest);
-  console.log(`[${new Date().toISOString()}] [browseragent] wrote default cli_config.json: ${dest}`);
+  logInfo("[browseragent] wrote default cli_config.json", { dest });
 }
 
 /**
@@ -734,7 +716,7 @@ function cleanupProfileLocks(profileDir: string): void {
     const lockPath = path.join(profileDir, lockName);
     if (existsSync(lockPath)) {
       rmSync(lockPath, { recursive: true, force: true });
-      console.log(`[${new Date().toISOString()}] [browser-guard] removed stale profile lock: ${lockPath}`);
+      logInfo("[browser-guard] removed stale profile lock", { lockPath });
     }
   }
 }
@@ -749,7 +731,7 @@ function browserGuardCloseAllBeforeOpen(): boolean {
 /** Release playwright-cli managed browsers before a new open, reduces \"Browser is already in use\". Non-fatal on failure. */
 function maybeClosePlaywrightCliSessionsBeforeOpen(shellCwd: string): void {
   if (!browserGuardCloseAllBeforeOpen()) {
-    console.log(`[${new Date().toISOString()}] [browser-guard] skip close-all (BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN=off)`);
+    logInfo("[browser-guard] skip close-all (BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN=off)");
     return;
   }
   try {
@@ -760,10 +742,10 @@ function maybeClosePlaywrightCliSessionsBeforeOpen(shellCwd: string): void {
       maxBuffer: 1024 * 1024,
       timeout: 20_000
     });
-    console.log(`[${new Date().toISOString()}] [browser-guard] playwright-cli close-all completed`);
+    logInfo("[browser-guard] playwright-cli close-all completed");
   } catch (e: any) {
     const hint = String(e?.stderr ?? e?.stdout ?? e?.message ?? e ?? "").slice(0, 240);
-    console.log(`[${new Date().toISOString()}] [browser-guard] playwright-cli close-all non-fatal: ${hint || "(no output)"}`);
+    logInfo("[browser-guard] playwright-cli close-all non-fatal", { hint: hint || "(no output)" });
   }
 }
 
@@ -797,9 +779,7 @@ function applyScreenshotPathGuard(
   if (touched) {
     const runDir = path.join(sidecarDir, "ai_testing", runId);
     if (!existsSync(runDir)) mkdirSync(runDir, { recursive: true });
-    console.log(
-      `[${new Date().toISOString()}] [shot-guard] rewrote screenshot --filename to ai_testing/${runId}/`,
-    );
+    logInfo("[shot-guard] rewrote screenshot --filename", { runId });
   }
   return rewritten;
 }
@@ -819,7 +799,7 @@ function applyPlaywrightOpenGuard(
   if (profileArg) {
     const profileDir = resolveProfileDirectory(profileArg, shellCwd);
     cleanupProfileLocks(profileDir);
-    console.log(`[${new Date().toISOString()}] [browser-guard] using existing profile: ${profileDir}`);
+    logInfo("[browser-guard] using existing profile", { profileDir });
     return command;
   }
 
@@ -827,9 +807,11 @@ function applyPlaywrightOpenGuard(
   const isolatedProfileDir = path.join(sidecarDir, "ai_testing", runId, ".playwright-profile");
   mkdirSync(isolatedProfileDir, { recursive: true });
   cleanupProfileLocks(isolatedProfileDir);
-  console.log(
-    `[${new Date().toISOString()}] [browser-guard] isolated profile enabled: ${isolatedProfileDir} (id=${queueEntry.id}, runId=${runId})`
-  );
+  logInfo("[browser-guard] isolated profile enabled", {
+    profileDir: isolatedProfileDir,
+    id: queueEntry.id,
+    runId,
+  });
   return `${command} --persistent --profile=${JSON.stringify(isolatedProfileDir)}`;
 }
 
@@ -1043,7 +1025,7 @@ async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime
   const runId = getQueueRunId(queueEntry);
   // Log the prompt.md path
 
-  console.log(`Using prompt.md from ${promptPath}`);
+  logInfo("[browseragent] using prompt.md", { promptPath, runId });
 
   const prompt = readFileSync(promptPath, "utf8");
 
@@ -1080,8 +1062,10 @@ async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime
     if (agentToolLogsEnabled() && event.type === "tool_execution_start") {
       const toolName = event.toolName || "unknown";
       const toolInput = event.args || {};
-      console.log(`\n🔧 [TOOL CALL] ${toolName}`);
-      console.log(`   Input: ${JSON.stringify(toolInput).substring(0, 200)}`);
+      logInfo("[tool] call", {
+        toolName,
+        input: JSON.stringify(toolInput).substring(0, 200),
+      });
     }
 
     // Log tool call results
@@ -1089,8 +1073,7 @@ async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime
       const toolName = event.toolName || "unknown";
       const result = event.result;
       const resultStr = typeof result === "string" ? result : JSON.stringify(result).substring(0, 300);
-      console.log(`\n✅ [TOOL RESULT] ${toolName}`);
-      console.log(`   ${resultStr}`);
+      logInfo("[tool] result", { toolName, result: resultStr });
     }
     
     // Model thinking/reasoning stream (stderr; not gated by AGENT_LOG_TOOLS)
@@ -1130,14 +1113,16 @@ async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime
       const errorMessage = (event.message as any).errorMessage as string | undefined;
       if (stopReason === "error" && errorMessage) {
         agentError = errorMessage;
-        process.stderr.write(`\n❌ Error: ${errorMessage}\n`);
+        logError("[browseragent] assistant message error", { error: errorMessage });
       }
     }
     
     // Log all other events for debugging (optional, can be removed later)
-    if (process.env.DEBUG_AGENT && event.type !== "message_update") {
-      console.log(`\n📡 [EVENT] ${event.type}`);
-      console.log(`   Data: ${JSON.stringify(event).substring(0, 500)}`);
+    if (agentDebugEventsEnabled() && event.type !== "message_update") {
+      logInfo("[browseragent] event", {
+        type: event.type,
+        data: JSON.stringify(event).substring(0, 500),
+      });
     }
   });
 
@@ -1179,6 +1164,12 @@ async function executeRunForCoordinator(request: RunRequest): Promise<void> {
 
   const taskLabel = `id=${request.extensionId}, runId=${request.sessionId}`;
   const sidecarDir = resolveExtensionSidecarRoot(queueEntry);
+  logInfo("[browseragent] task started", {
+    extensionId: request.extensionId,
+    version: request.version,
+    sessionId: request.sessionId,
+    timeoutMs: taskTimeoutMs,
+  });
   try {
     await runWithTimeoutAndFinalize(
       runExtensionAgent(queueEntry, runtime),
@@ -1201,7 +1192,7 @@ async function executeRunForCoordinator(request: RunRequest): Promise<void> {
       { id: request.extensionId, version: request.version, status: "complete", runId: request.sessionId, index: queueEntry.index, error: undefined },
       queueEntry
     );
-    console.log(`[${new Date().toISOString()}] Completed task: ${taskLabel}`);
+    logInfo("[browseragent] task completed", { taskLabel });
   } catch (error: any) {
     const errorMessage = error?.message ?? String(error);
     const isTimeout = typeof errorMessage === "string" && errorMessage.startsWith("Task timed out after");
@@ -1212,9 +1203,9 @@ async function executeRunForCoordinator(request: RunRequest): Promise<void> {
       queueEntry
     );
     if (isTimeout) {
-      console.error(`[${new Date().toISOString()}] Task TIMEOUT: ${taskLabel}, timeout=${taskTimeoutMs}ms`);
+      logError("[browseragent] task timeout", { taskLabel, timeoutMs: taskTimeoutMs });
     } else {
-      console.error(`[${new Date().toISOString()}] Failed task: ${taskLabel}, error=${errorMessage}`);
+      logError("[browseragent] task failed", { taskLabel, error: errorMessage });
     }
   }
 }
@@ -1228,9 +1219,10 @@ function resolveTaskTimeoutMs(): number {
   if (!raw) return DEFAULT_TASK_TIMEOUT_MS;
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    console.warn(
-      `[${new Date().toISOString()}] Invalid TASK_TIMEOUT_MS=${raw}, fallback to default ${DEFAULT_TASK_TIMEOUT_MS}ms`
-    );
+    logWarn("[browseragent] invalid TASK_TIMEOUT_MS, using default", {
+      raw,
+      defaultMs: DEFAULT_TASK_TIMEOUT_MS,
+    });
     return DEFAULT_TASK_TIMEOUT_MS;
   }
   return Math.floor(parsed);
@@ -1351,8 +1343,8 @@ async function runDirectExtensionOnce(
   taskTimeoutMs: number
 ): Promise<void> {
   if (!direct.id.trim()) {
-    console.error(
-      `[${new Date().toISOString()}] --run-extension requires a Chrome Web Store extension id, e.g. npm run dev -- --run-extension nkbihfbeogaeaoehlefnkodbefgpgknn`
+    logError(
+      "[browseragent] --run-extension requires a Chrome Web Store extension id, e.g. npm run dev -- --run-extension nkbihfbeogaeaoehlefnkodbefgpgknn",
     );
     process.exit(1);
   }
@@ -1362,15 +1354,17 @@ async function runDirectExtensionOnce(
   if (!version) {
     const picked = resolveLatestAnalyzerVersion(id);
     if (!picked) {
-      console.error(
-        `[${new Date().toISOString()}] No unpacked extension under ${path.join(EXTENSION_ANALYZER_ROOT, id)}. Unpack a version directory or pass --version <folderName> (same as under chrome-extension-analyzer/<id>/).`
-      );
+      logError("[browseragent] no unpacked extension for direct run", {
+        path: path.join(EXTENSION_ANALYZER_ROOT, id),
+      });
       process.exit(1);
     }
     version = picked;
-    console.log(
-      `[${new Date().toISOString()}] Direct run: using version folder "${version}" (latest mtime under ${EXTENSION_ANALYZER_DIR}/${id}/).`
-    );
+    logInfo("[browseragent] direct run using latest version folder", {
+      version,
+      id,
+      analyzerDir: `${EXTENSION_ANALYZER_DIR}/${id}/`,
+    });
   }
 
   const index = Date.now();
@@ -1388,9 +1382,11 @@ async function runDirectExtensionOnce(
 
   const unpackRoot = resolveExtensionArtifactRoot(queueEntry);
   const taskLabel = `id=${id}, runId=${runId} (direct)`;
-  console.log(
-    `[${new Date().toISOString()}] Direct extension run (no queue): ${taskLabel}, unpack=${unpackRoot}, timeout=${taskTimeoutMs}ms`
-  );
+  logInfo("[browseragent] direct extension run started", {
+    taskLabel,
+    unpackRoot,
+    timeoutMs: taskTimeoutMs,
+  });
 
   let status = loadStatus();
   status = updateStatus(
@@ -1413,7 +1409,7 @@ async function runDirectExtensionOnce(
       { id, version, status: "complete", index, runId, error: undefined },
       queueEntry
     );
-    console.log(`[${new Date().toISOString()}] Direct run completed: ${taskLabel}`);
+    logInfo("[browseragent] direct run completed", { taskLabel });
     process.exit(0);
   } catch (error: any) {
     const errorMessage = error?.message ?? String(error);
@@ -1425,11 +1421,9 @@ async function runDirectExtensionOnce(
       queueEntry
     );
     if (isTimeout) {
-      console.error(
-        `[${new Date().toISOString()}] Direct run TIMEOUT: ${taskLabel}, timeout=${taskTimeoutMs}ms`
-      );
+      logError("[browseragent] direct run timeout", { taskLabel, timeoutMs: taskTimeoutMs });
     } else {
-      console.error(`[${new Date().toISOString()}] Direct run failed: ${errorMessage}`);
+      logError("[browseragent] direct run failed", { taskLabel, error: errorMessage });
     }
     process.exit(1);
   }
@@ -1442,9 +1436,7 @@ async function main() {
 
   if (devCli.directRun) {
     if (devCli.extensionIdFilter) {
-      console.log(
-        `[${new Date().toISOString()}] Note: --eid is ignored when --run-extension is set (direct run).`
-      );
+      logInfo("[browseragent] note: --eid is ignored when --run-extension is set (direct run)");
     }
     await runDirectExtensionOnce(devCli.directRun, runtime, taskTimeoutMs);
     return;
@@ -1453,10 +1445,11 @@ async function main() {
   registerRunExecutor(executeRunForCoordinator);
   const controlPlane = maybeStartControlPlaneServer();
 
-  console.log(
-    `[${new Date().toISOString()}] Browser agent service ready (HTTP dispatch only; no local queue). ` +
-      `Task agent budget: ${taskTimeoutMs}ms (TASK_TIMEOUT_MS); on timeout, finalize screenshots+network up to ${resolveTaskFinalizeTimeoutMs()}ms (TASK_FINALIZE_TIMEOUT_MS) before reporting error.`
-  );
+  logInfo("[browseragent] service ready", {
+    mode: "HTTP dispatch only; no local queue",
+    taskTimeoutMs,
+    finalizeTimeoutMs: resolveTaskFinalizeTimeoutMs(),
+  });
 
   process.on("SIGINT", () => {
     if (controlPlane) {

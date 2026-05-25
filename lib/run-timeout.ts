@@ -1,3 +1,4 @@
+import { logInfo, logWarn } from "./app-logger.js";
 import { finalizeRunArtifactsOnTimeout } from "./run-artifacts-finalize.js";
 
 export type RunTimeoutFinalizeContext = {
@@ -27,17 +28,18 @@ export async function runWithTimeoutAndFinalize<T>(
             sidecarDir: finalize.sidecarDir,
             runId: finalize.runId,
           });
-          console.log(
-            `[${new Date().toISOString()}] Timeout finalize (${taskLabel}): network=${result.networkCount} req, ` +
-              `screenshots present=${result.screenshots.present}/${result.screenshots.referenced}, ` +
-              `shellDrained=${result.shellDrained}, waited=${result.shellWaitedMs}ms` +
-              (result.errors.length ? `, notes=${result.errors.join("; ")}` : ""),
-          );
+          logInfo("[run] timeout finalize completed", {
+            taskLabel,
+            networkCount: result.networkCount,
+            screenshotsPresent: result.screenshots.present,
+            screenshotsReferenced: result.screenshots.referenced,
+            shellDrained: result.shellDrained,
+            shellWaitedMs: result.shellWaitedMs,
+            ...(result.errors.length ? { notes: result.errors.join("; ") } : {}),
+          });
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
-          console.warn(
-            `[${new Date().toISOString()}] Timeout finalize failed (${taskLabel}): ${message}`,
-          );
+          logWarn("[run] timeout finalize failed", { taskLabel, error: message });
         }
         rejectTimeout?.(new Error(`Task timed out after ${timeoutMs}ms (${taskLabel})`));
       })();

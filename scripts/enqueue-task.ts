@@ -1,4 +1,4 @@
-import path from "node:path";
+import { logError, logInfo } from "../lib/app-logger.js";
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -53,10 +53,16 @@ async function main() {
     throw new Error(`Dispatch failed (${res.status}): ${detail}`);
   }
 
-  console.log(`Task dispatched: id=${id}, version=${version}, sessionId=${json.sessionId ?? runId}`);
+  logInfo("[browseragent] task dispatched", {
+    id,
+    version,
+    sessionId: json.sessionId ?? runId,
+  });
 }
 
 main().catch((e) => {
-  console.error(e instanceof Error ? e.message : String(e));
+  logError("[browseragent] enqueue failed", {
+    error: e instanceof Error ? e.message : String(e),
+  });
   process.exit(1);
 });

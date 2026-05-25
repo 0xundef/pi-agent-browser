@@ -64,7 +64,7 @@ npm run dev
    - Prompt resolution prefers `$AGENT_QUEUE_ROOT/extension-data/<id>/prompt.md`, then falls back to `$AGENT_QUEUE_ROOT/prompt.md` (OArmour seeds the default from its bundled template; standalone runs copy `resources/default-extension-test-prompt.md` when missing).
 4. `runExtensionAgent` loads `prompt.md` and drives tools such as `playwright-cli`.
    - **Browser guard** around `playwright-cli open`: by default **`playwright-cli close-all` runs before each open** (disable with `BROWSER_GUARD_CLOSE_ALL_BEFORE_OPEN=0`); reuse an existing `--profile` when present (and clear common Chromium lock files like `SingletonLock` before launch); if the command has no `--profile`, append `--persistent` and use an isolated profile at `$AGENT_QUEUE_ROOT/extension-data/<id>/<version>/ai_testing/<runId>/.playwright-profile` to reduce `Browser is already in use` failures.
-   - Logs tagged `[browser-guard]` show close-all, lock cleanup, and isolated profile usage.
+   - Service logs use `lib/app-logger.ts` (ISO prefix, same style as oarmour-site): `[browseragent]`, `[browser-guard]`, `[shot-guard]`, `[control-plane]`, `[run]`, `[tool]`. Verbosity: `AGENT_LOG_TOOLS`, `AGENT_LOG_THINKING`, `AGENT_DEBUG_QUEUE`, `DEBUG_AGENT` (see `.env.example`).
 5. During the run, `record_step` appends to `$AGENT_QUEUE_ROOT/extension-data/<id>/<version>/ai_testing/<runId>/recordings.json` and stores screenshots in the same folder.
 6. On success or failure, `status.json` is updated with:
    - `status` (`running` / `complete` / `error`)

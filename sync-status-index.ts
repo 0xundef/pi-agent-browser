@@ -1,6 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { logError, logInfo } from "./lib/app-logger.js";
 
 type QueueItem = {
   id: string;
@@ -86,15 +87,15 @@ async function main() {
 
   if (targetIndex === -1) {
     if (args.id || args.version) {
-      console.log("No matching target found in agent queue status.json for provided --id and --version.");
+      logInfo("[browseragent] sync-status-index: no matching target", { id: args.id, version: args.version });
     } else {
-      console.log("All status records are already synced. No update needed.");
+      logInfo("[browseragent] sync-status-index: all records already synced");
     }
     return;
   }
 
   if (targetMatchedIndex === undefined) {
-    console.log("Target found, but no index mapping exists in agent queue incoming_queue.json.");
+    logInfo("[browseragent] sync-status-index: target found but no index mapping in incoming_queue.json");
     return;
   }
 
@@ -108,13 +109,17 @@ async function main() {
 
   await writeFile(statusPath, `${JSON.stringify(nextStatus, null, 2)}\n`, "utf8");
 
-  console.log("Done. Updated exactly 1 record in agent queue status.json");
-  console.log(
-    `Target: id=${target.id}, version=${target.version}, oldIndex=${String(previousIndex)}, newIndex=${targetMatchedIndex}`
-  );
+  logInfo("[browseragent] sync-status-index: updated one record", {
+    id: target.id,
+    version: target.version,
+    oldIndex: previousIndex,
+    newIndex: targetMatchedIndex,
+  });
 }
 
 main().catch((error) => {
-  console.error("Failed to sync index:", error);
+  logError("[browseragent] sync-status-index failed", {
+    error: error instanceof Error ? error.message : String(error),
+  });
   process.exitCode = 1;
 });

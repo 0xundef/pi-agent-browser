@@ -15,6 +15,8 @@ import {
 export { registerRunExecutor, type RunExecutor };
 
 import http from "node:http";
+import { logInfo } from "./app-logger.js";
+import { agentDebugQueueLogsEnabled } from "./log-flags.js";
 import { closeAllPlaywrightSessions, closePlaywrightSession, killAllPlaywrightSessions, listPlaywrightSessions } from "./playwright-cli-admin.js";
 
 type JsonBody = Record<string, unknown>;
@@ -156,6 +158,14 @@ export function createControlPlaneServer() {
         }
         const result = await requestStartRun({ extensionId, version, sessionId, extensionName: name });
         if (!result.ok) {
+          if (agentDebugQueueLogsEnabled()) {
+            logInfo("[control-plane] session start rejected", {
+              extensionId,
+              version,
+              sessionId,
+              reason: result.reason,
+            });
+          }
           const status = result.reason === "at_capacity" ? 429 : 409;
           sendJson(res, status, { ok: false, reason: result.reason });
           return;
@@ -212,21 +222,22 @@ function resolveControlPlanePort(): number | null {
 export function startControlPlaneServer(port: number): http.Server {
   const server = createControlPlaneServer();
   server.listen(port, () => {
-    console.log(
-      `[${new Date().toISOString()}] Browser agent control plane listening on http://127.0.0.1:${port} (maxConcurrent=${resolveMaxConcurrentRuns()})`,
-    );
+    logInfo("[control-plane] listening", {
+      url: `http://127.0.0.1:${port}`,
+      maxConcurrent: resolveMaxConcurrentRuns(),
+    });
   });
   return server;
 }
 
 export function maybeStartControlPlaneServer(): http.Server | null {
   if (!controlPlaneEnabled()) {
-    console.log(`[${new Date().toISOString()}] Control plane disabled (BROWSER_AGENT_API_ENABLED=off).`);
+    logInfo("[control-plane] disabled (BROWSER_AGENT_API_ENABLED=off)");
     return null;
   }
   const port = resolveControlPlanePort();
   if (port === null) {
-    console.log(`[${new Date().toISOString()}] Control plane disabled (invalid BROWSER_AGENT_API_PORT).`);
+    logInfo("[control-plane] disabled (invalid BROWSER_AGENT_API_PORT)");
     return null;
   }
   return startControlPlaneServer(port);

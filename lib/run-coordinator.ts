@@ -1,3 +1,4 @@
+import { logError } from "./app-logger.js";
 import type { StatusEntry } from "./status-store.js";
 
 export type RunRequest = {
@@ -75,9 +76,10 @@ export async function requestStartRun(params: {
 
   void executor(request)
     .catch((e) => {
-      console.error(
-        `[${new Date().toISOString()}] Run executor failed sessionId=${sessionId}: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      logError("[run] executor failed", {
+        sessionId,
+        error: e instanceof Error ? e.message : String(e),
+      });
     })
     .finally(() => {
       activeSessionIds.delete(sessionId);
