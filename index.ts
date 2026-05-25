@@ -19,6 +19,13 @@ import * as bip39 from "bip39";
 import { clearNetworkCapture, saveNetworkCapture } from "./lib/network-capture.js";
 import { maybeStartControlPlaneServer } from "./lib/control-plane-server.js";
 import { registerRunExecutor, isSessionCancelled, type RunRequest } from "./lib/run-coordinator.js";
+import {
+  beginShellCommand,
+  endShellCommand,
+  isFinalizeRequested,
+} from "./lib/run-shell-tracker.js";
+import { resolveTaskFinalizeTimeoutMs } from "./lib/run-artifacts-finalize.js";
+import { runWithTimeoutAndFinalize } from "./lib/run-timeout.js";
 
 dotenv.config();
 dotenv.config({ path: path.resolve(process.cwd(), ".env.local") });
@@ -837,21 +844,34 @@ function createExtensionShellCommandTool(
     description: `Executes a shell command and returns stdout, stderr, and exit code. Default working directory: ${sidecarDir} (cli_config.json). Unpacked extension: ${extDir}.`,
     parameters: shellCommandParameters,
     async execute(_toolCallId: string, params: ShellCommandParameters) {
+      const runId = getQueueRunId(queueEntry);
+      if (isFinalizeRequested(runId)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Shell commands are blocked: task timeout finalization is saving screenshots and network traffic.",
+            },
+          ],
+          details: { stdout: "", stderr: "finalize_in_progress", exitCode: 1 },
+        };
+      }
+      beginShellCommand(runId);
       try {
         const shellCwd = params.cwd ? path.resolve(sidecarDir, params.cwd) : sidecarDir;
         if (/\bplaywright-cli\s+open\b/.test(params.command)) {
           maybeClosePlaywrightCliSessionsBeforeOpen(shellCwd);
         }
         const guardedCommand = applyPlaywrightOpenGuard(params.command, extDir, sidecarDir, queueEntry, shellCwd);
-        const finalCommand = applyScreenshotPathGuard(guardedCommand, sidecarDir, getQueueRunId(queueEntry));
+        const finalCommand = applyScreenshotPathGuard(guardedCommand, sidecarDir, runId);
         const result = execSync(finalCommand, {
           cwd: shellCwd,
           encoding: "utf8",
-          maxBuffer: 1024 * 1024 * 10
+          maxBuffer: 1024 * 1024 * 10,
         });
         return {
           content: [{ type: "text", text: result }],
-          details: { stdout: result, stderr: "", exitCode: 0 }
+          details: { stdout: result, stderr: "", exitCode: 0 },
         };
       } catch (error: any) {
         const stdout = error.stdout ?? "";
@@ -859,10 +879,12 @@ function createExtensionShellCommandTool(
         const exitCode = error.status ?? 1;
         return {
           content: [{ type: "text", text: stderr || stdout }],
-          details: { stdout, stderr, exitCode }
+          details: { stdout, stderr, exitCode },
         };
+      } finally {
+        endShellCommand(runId);
       }
-    }
+    },
   };
 }
 
@@ -1156,8 +1178,14 @@ async function executeRunForCoordinator(request: RunRequest): Promise<void> {
   );
 
   const taskLabel = `id=${request.extensionId}, runId=${request.sessionId}`;
+  const sidecarDir = resolveExtensionSidecarRoot(queueEntry);
   try {
-    await runWithTimeout(runExtensionAgent(queueEntry, runtime), taskTimeoutMs, taskLabel);
+    await runWithTimeoutAndFinalize(
+      runExtensionAgent(queueEntry, runtime),
+      taskTimeoutMs,
+      taskLabel,
+      { sidecarDir, runId: request.sessionId },
+    );
     if (isSessionCancelled(request.sessionId)) {
       status = loadStatus();
       updateStatus(
@@ -1316,27 +1344,6 @@ function parseDevCliOptions(argv: string[]): DevCliOptions {
   };
 }
 
-async function runWithTimeout<T>(
-  work: Promise<T>,
-  timeoutMs: number,
-  taskLabel: string
-): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(new Error(`Task timed out after ${timeoutMs}ms (${taskLabel})`));
-    }, timeoutMs);
-    if (typeof timer.unref === "function") {
-      timer.unref();
-    }
-  });
-  try {
-    return await Promise.race([work, timeoutPromise]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
 /** One-shot agent run: no `incoming_queue.json`, no file watchers; updates `status.json` like queue mode. */
 async function runDirectExtensionOnce(
   direct: DirectRunCli,
@@ -1392,8 +1399,14 @@ async function runDirectExtensionOnce(
     queueEntry
   );
 
+  const sidecarDir = resolveExtensionSidecarRoot(queueEntry);
   try {
-    await runWithTimeout(runExtensionAgent(queueEntry, runtime), taskTimeoutMs, taskLabel);
+    await runWithTimeoutAndFinalize(
+      runExtensionAgent(queueEntry, runtime),
+      taskTimeoutMs,
+      taskLabel,
+      { sidecarDir, runId },
+    );
     status = loadStatus();
     updateStatus(
       status,
@@ -1441,7 +1454,8 @@ async function main() {
   const controlPlane = maybeStartControlPlaneServer();
 
   console.log(
-    `[${new Date().toISOString()}] Browser agent service ready (HTTP dispatch only; no local queue). Task hard timeout: ${taskTimeoutMs}ms (override via TASK_TIMEOUT_MS).`
+    `[${new Date().toISOString()}] Browser agent service ready (HTTP dispatch only; no local queue). ` +
+      `Task agent budget: ${taskTimeoutMs}ms (TASK_TIMEOUT_MS); on timeout, finalize screenshots+network up to ${resolveTaskFinalizeTimeoutMs()}ms (TASK_FINALIZE_TIMEOUT_MS) before reporting error.`
   );
 
   process.on("SIGINT", () => {

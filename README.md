@@ -70,13 +70,18 @@ npm run dev
    - `status` (`running` / `complete` / `error`)
    - `status_time`
    - `duration` (seconds)
-7. **Hard timeout** per task: if the run exceeds the limit, status is set to `error` with a message like `Task timed out after <ms>ms (id=..., index=...)`, and `status_time` / `duration` are refreshed.
-   - Default: 10 minutes (`600000` ms).
-   - Override with `TASK_TIMEOUT_MS` (milliseconds), for example:
+7. **Task timeout** per run: when the agent budget is exceeded, the service **finalizes artifacts before** marking `error`:
+   - Waits for in-flight `shell_command` (e.g. `playwright-cli screenshot`) to finish.
+   - Syncs screenshot files referenced in `recordings.json` under `ai_testing/<runId>/`.
+   - Saves `ai_testing/<runId>/network.json` via `playwright-cli network` (empty `requests` if none).
+   - Then sets status to `error` with `Task timed out after <ms>ms (...)`.
+   - Agent budget default: 10 minutes (`600000` ms), override with `TASK_TIMEOUT_MS`.
+   - Finalize budget default: 2 minutes (`120000` ms), override with `TASK_FINALIZE_TIMEOUT_MS` (extra wall time after the agent budget; not included in the timeout error message).
+   - Example:
      ```bash
-     TASK_TIMEOUT_MS=300000 npm run dev   # 5 minutes
+     TASK_TIMEOUT_MS=600000 TASK_FINALIZE_TIMEOUT_MS=120000 npm run dev
      ```
-   - Startup logs print the effective timeout to help debug stuck tasks.
+   - Startup logs print both budgets.
 
 ```bash
 npm run dev
