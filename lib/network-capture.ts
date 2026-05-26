@@ -10,10 +10,27 @@ const INCLUDE_STATIC =
 const REQUESTS_CMD = `playwright-cli requests${INCLUDE_STATIC ? " --static" : ""} --filter=${JSON.stringify(NETWORK_FILTER)}`;
 const LEGACY_NETWORK_CMD = `playwright-cli network --request-headers --filter=${JSON.stringify(NETWORK_FILTER)}`;
 
+/** Default on: fetch POST request-headers + request-body at capture time. Set to 0 to disable. */
+const CAPTURE_POST_DETAILS =
+  process.env.AGENT_NETWORK_CAPTURE_POST_DETAILS?.trim().toLowerCase() !== "0" &&
+  process.env.AGENT_NETWORK_CAPTURE_POST_DETAILS?.trim().toLowerCase() !== "false";
+
+const POST_BODY_MAX_BYTES = Math.max(
+  1024,
+  Number.parseInt(process.env.AGENT_NETWORK_POST_BODY_MAX_BYTES ?? "262144", 10) || 262144,
+);
+
+const POST_ENRICH_MAX = Math.max(
+  1,
+  Number.parseInt(process.env.AGENT_NETWORK_POST_ENRICH_MAX ?? "200", 10) || 200,
+);
+
 export type NetworkRequestEntry = {
   method: string;
   url: string;
   status: number | null;
+  /** 1-based index from `playwright-cli requests` (used for request-headers / request-body). */
+  cliIndex?: number;
   /** True when playwright-cli reports `=> [FAILED]` (no HTTP response, e.g. DNS / TLS / blocked). */
   failed?: boolean;
   /** Chromium net error text when `failed` is true, e.g. `net::ERR_NAME_NOT_RESOLVED`. */
@@ -22,6 +39,9 @@ export type NetworkRequestEntry = {
   resourceType?: "fetch" | "xhr" | "websocket";
   requestedAt?: string;
   requestHeaders?: Record<string, string>;
+  /** POST body from `playwright-cli request-body` (null = none or not captured). */
+  requestBody?: string | null;
+  requestBodyTruncated?: boolean;
 };
 
 export type NetworkLog = {
@@ -29,6 +49,7 @@ export type NetworkLog = {
   source: "playwright-cli requests" | "playwright-cli network";
   filter: string;
   includeStatic: boolean;
+  capturePostDetails: boolean;
   /** Exclusions applied when saving (not playwright-cli filter). */
   resourceTypes: string[];
   requestCount: number;
@@ -65,36 +86,75 @@ export function extractNetworkCliText(stdout: string): string {
   return stdout;
 }
 
+function splitNumberedLine(trimmed: string): { cliIndex?: number; rest: string } {
+  const numbered = trimmed.match(/^(\d+)\.\s+(.*)$/);
+  if (numbered) return { cliIndex: Number(numbered[1]), rest: numbered[2]! };
+  return { rest: trimmed };
+}
+
+export function parseHeaderBlock(text: string): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("###")) continue;
+    const colon = trimmed.indexOf(":");
+    if (colon <= 0) continue;
+    const key = trimmed.slice(0, colon).trim();
+    const value = trimmed.slice(colon + 1).trim();
+    if (key) headers[key] = value;
+  }
+  return headers;
+}
+
+function truncateUtf8(text: string, maxBytes: number): { text: string; truncated: boolean } {
+  if (Buffer.byteLength(text, "utf8") <= maxBytes) return { text, truncated: false };
+  let end = Math.min(text.length, maxBytes);
+  while (end > 0 && Buffer.byteLength(text.slice(0, end), "utf8") > maxBytes) {
+    end -= 1;
+  }
+  return { text: `${text.slice(0, end)}\n...[truncated]`, truncated: true };
+}
+
 /** Parses `playwright-cli requests` / legacy `network` text output. */
 export function parsePlaywrightNetworkOutput(stdout: string): NetworkRequestEntry[] {
   const text = extractNetworkCliText(stdout);
   const lines = text.split("\n");
   const entries: NetworkRequestEntry[] = [];
-  let current: NetworkRequestEntry | null = null;
-  let inHeaders = false;
+  let active: NetworkRequestEntry | null = null;
+  let autoIndex = 0;
 
-  // Status may be `[200]` or `[200] OK` depending on playwright-cli version.
-  // URL: greedy `.+?` before `=>` (not `\S+`) so query strings with `&` and `=` are kept intact.
-  const lineRe =
-    /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(.+?)\s+=>\s+\[(\d+)\](?:\s+\S+)?\s*$/;
-  const linePendingRe = /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(.+?)\s+=>\s+\[\]\s*$/;
-  const lineFailedRe =
-    /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(.+?)\s+=>\s+\[FAILED\]\s+(.+)\s*$/;
-  const lineInFlightRe = /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(.+?)\s*$/;
+  const lineRe = /^\[([A-Z]+)\]\s+(.+?)\s+=>\s+\[(\d+)\](?:\s+\S+)?\s*$/;
+  const linePendingRe = /^\[([A-Z]+)\]\s+(.+?)\s+=>\s+\[\]\s*$/;
+  const lineFailedRe = /^\[([A-Z]+)\]\s+(.+?)\s+=>\s+\[FAILED\]\s+(.+)\s*$/;
+  const lineInFlightRe = /^\[([A-Z]+)\]\s+(.+?)\s*$/;
 
   const pushCurrent = () => {
-    if (!current) return;
-    if (!shouldIncludeNetworkUrl(current.url)) {
-      current = null;
-      inHeaders = false;
+    if (!active) return;
+    if (!shouldIncludeNetworkUrl(active.url)) {
+      active = null;
       return;
     }
-    const url = current.url.toLowerCase();
+    const url = active.url.toLowerCase();
     const resourceType: NetworkRequestEntry["resourceType"] | undefined =
       url.startsWith("ws://") || url.startsWith("wss://") ? "websocket" : undefined;
-    entries.push({ ...current, ...(resourceType ? { resourceType } : {}) });
-    current = null;
-    inHeaders = false;
+    entries.push({ ...active, ...(resourceType ? { resourceType } : {}) });
+    active = null;
+  };
+
+  const beginEntry = (fields: {
+    cliIndex?: number;
+    method: string;
+    url: string;
+    status: number | null;
+    failed?: boolean;
+    errorText?: string;
+  }) => {
+    pushCurrent();
+    autoIndex += 1;
+    active = {
+      ...fields,
+      cliIndex: fields.cliIndex ?? autoIndex,
+    };
   };
 
   for (const raw of lines) {
@@ -103,73 +163,112 @@ export function parsePlaywrightNetworkOutput(stdout: string): NetworkRequestEntr
     if (!trimmed || trimmed.startsWith("###")) continue;
     if (trimmed.startsWith("Note:")) continue;
 
-    const match = trimmed.match(lineRe);
+    const { cliIndex, rest } = splitNumberedLine(trimmed);
+
+    const match = rest.match(lineRe);
     if (match) {
-      pushCurrent();
-      current = {
+      beginEntry({
+        cliIndex,
         method: match[1],
         url: match[2].trim(),
         status: Number(match[3]),
-        requestHeaders: {},
-      };
+      });
       continue;
     }
 
-    const pending = trimmed.match(linePendingRe);
+    const pending = rest.match(linePendingRe);
     if (pending) {
-      pushCurrent();
-      current = {
+      beginEntry({
+        cliIndex,
         method: pending[1],
         url: pending[2].trim(),
         status: null,
-        requestHeaders: {},
-      };
+      });
       continue;
     }
 
-    const failed = trimmed.match(lineFailedRe);
+    const failed = rest.match(lineFailedRe);
     if (failed) {
-      pushCurrent();
-      current = {
+      beginEntry({
+        cliIndex,
         method: failed[1],
         url: failed[2].trim(),
         status: null,
         failed: true,
         errorText: failed[3].trim(),
-        requestHeaders: {},
-      };
+      });
       continue;
     }
 
-    const inFlight = trimmed.match(lineInFlightRe);
-    if (inFlight && !trimmed.includes("=>")) {
-      pushCurrent();
-      current = {
+    const inFlight = rest.match(lineInFlightRe);
+    if (inFlight && !rest.includes("=>")) {
+      beginEntry({
+        cliIndex,
         method: inFlight[1],
         url: inFlight[2].trim(),
         status: null,
-        requestHeaders: {},
-      };
+      });
       continue;
     }
 
-    if (trimmed === "Request headers:") {
-      inHeaders = true;
-      continue;
-    }
-
-    if (inHeaders && current) {
-      const colon = trimmed.indexOf(":");
-      if (colon > 0) {
-        const key = trimmed.slice(0, colon).trim();
-        const value = trimmed.slice(colon + 1).trim();
-        current.requestHeaders ??= {};
-        current.requestHeaders[key] = value;
-      }
-    }
   }
   pushCurrent();
   return entries;
+}
+
+function runPlaywrightCli(sidecarDir: string, command: string): string | null {
+  try {
+    return execInSidecar(sidecarDir, command);
+  } catch {
+    return null;
+  }
+}
+
+/** For each POST, run `request-headers` and `request-body` (includes failed POSTs). */
+export function enrichPostRequestDetails(
+  sidecarDir: string,
+  requests: NetworkRequestEntry[],
+): { enriched: number; skippedCap: number } {
+  if (!CAPTURE_POST_DETAILS) return { enriched: 0, skippedCap: 0 };
+
+  let enriched = 0;
+  let skippedCap = 0;
+
+  for (const req of requests) {
+    if (req.method.toUpperCase() !== "POST" || req.cliIndex == null) continue;
+    if (enriched >= POST_ENRICH_MAX) {
+      skippedCap += 1;
+      continue;
+    }
+
+    const idx = req.cliIndex;
+
+    const headersOut = runPlaywrightCli(sidecarDir, `playwright-cli request-headers ${idx}`);
+    if (headersOut) {
+      const parsed = parseHeaderBlock(extractNetworkCliText(headersOut));
+      if (Object.keys(parsed).length > 0) {
+        req.requestHeaders = parsed;
+      }
+    }
+
+    const bodyOut = runPlaywrightCli(sidecarDir, `playwright-cli request-body ${idx}`);
+    if (bodyOut === null) {
+      req.requestBody = null;
+    } else {
+      const body = extractNetworkCliText(bodyOut).trim();
+      if (!body) {
+        req.requestBody = null;
+      } else {
+        const { text, truncated } = truncateUtf8(body, POST_BODY_MAX_BYTES);
+        req.requestBody = text;
+        if (truncated) req.requestBodyTruncated = true;
+      }
+    }
+
+    enriched += 1;
+  }
+
+  return { enriched, skippedCap };
 }
 
 function runPlaywrightNetwork(sidecarDir: string): { stdout: string; source: NetworkLog["source"] } {
@@ -203,16 +302,19 @@ export function collectNetworkFromCli(sidecarDir: string): {
   source: NetworkLog["source"];
 } {
   const { stdout, source } = runPlaywrightNetwork(sidecarDir);
-  return { requests: parsePlaywrightNetworkOutput(stdout), source };
+  const requests = parsePlaywrightNetworkOutput(stdout);
+  enrichPostRequestDetails(sidecarDir, requests);
+  return { requests, source };
 }
 
 /** Writes ai_testing/<runId>/network.json from playwright-cli requests output (requests may be empty). */
 export function saveNetworkCapture(params: {
   sidecarDir: string;
   runId: string;
-}): { dest: string; count: number } {
+}): { dest: string; count: number; postEnriched: number } {
   const { stdout, source } = runPlaywrightNetwork(params.sidecarDir);
   const requests = parsePlaywrightNetworkOutput(stdout);
+  const { enriched: postEnriched } = enrichPostRequestDetails(params.sidecarDir, requests);
   const runDir = path.join(params.sidecarDir, "ai_testing", params.runId);
   mkdirSync(runDir, { recursive: true });
   const dest = path.join(runDir, "network.json");
@@ -224,10 +326,11 @@ export function saveNetworkCapture(params: {
     source,
     filter: NETWORK_FILTER,
     includeStatic: INCLUDE_STATIC,
+    capturePostDetails: CAPTURE_POST_DETAILS,
     resourceTypes: ["all-except-chrome-extension"],
     requestCount: requests.length,
     requests,
   };
   writeFileSync(dest, `${JSON.stringify(log, null, 2)}\n`, "utf8");
-  return { dest, count: requests.length };
+  return { dest, count: requests.length, postEnriched };
 }

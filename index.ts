@@ -904,19 +904,19 @@ function createCaptureNetworkTrafficTool(
   return {
     name: "capture_network_traffic",
     label: "Save captured network traffic",
-    description: `Runs playwright-cli requests (https filter), saves matching entries except chrome-extension:// to ai_testing/${runId}/network.json for offline review. Call before validate_recordings; do not rely on request <index> after the session ends.`,
+    description: `Runs playwright-cli requests (https filter), saves matching entries except chrome-extension:// to ai_testing/${runId}/network.json. For every POST (including failed), also stores request headers and body via request-headers / request-body. Call before validate_recordings while the browser session is still open.`,
     parameters: emptyToolParameters,
     async execute() {
       try {
-        const { dest, count } = saveNetworkCapture({ sidecarDir, runId });
+        const { dest, count, postEnriched } = saveNetworkCapture({ sidecarDir, runId });
         return {
           content: [
             {
               type: "text",
-              text: `Saved ${count} request(s) to ${dest} (playwright-cli requests)`
+              text: `Saved ${count} request(s) to ${dest} (playwright-cli requests; ${postEnriched} POST with headers/body)`
             }
           ],
-          details: { dest, count, ok: true }
+          details: { dest, count, postEnriched, ok: true }
         };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
