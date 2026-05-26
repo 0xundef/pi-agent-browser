@@ -76,6 +76,7 @@ function writeEmptyNetworkJson(runDir: string, reason: string): string {
     capturedAt: new Date().toISOString(),
     source: "playwright-cli requests",
     filter: process.env.AGENT_NETWORK_FILTER ?? "https?://",
+    includeStatic: true,
     resourceTypes: ["all-except-chrome-extension"],
     requestCount: 0,
     requests: [],
