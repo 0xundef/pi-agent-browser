@@ -2,30 +2,40 @@
 
 export const nowIso = () => new Date().toISOString();
 
+type LogSink = (message: string, payload?: unknown) => void;
+
+let logSink: LogSink | null = null;
+
+/** Mirror structured logs into `agent_testing.log` while a run is active. */
+export function setLogSink(sink: LogSink | null): void {
+  logSink = sink;
+}
+
 function formatPrefix(message: string) {
   return `${nowIso()} ${message}`;
 }
 
+function emit(level: "info" | "warn" | "error", message: string, payload?: unknown) {
+  const prefix = formatPrefix(message);
+  if (level === "info") {
+    if (typeof payload === "undefined") console.info(prefix);
+    else console.info(prefix, payload);
+  } else if (level === "warn") {
+    if (typeof payload === "undefined") console.warn(prefix);
+    else console.warn(prefix, payload);
+  } else if (typeof payload === "undefined") console.error(prefix);
+  else console.error(prefix, payload);
+  logSink?.(message, payload);
+}
+
 export function logInfo(message: string, payload?: unknown) {
-  if (typeof payload === "undefined") {
-    console.info(formatPrefix(message));
-    return;
-  }
-  console.info(formatPrefix(message), payload);
+  emit("info", message, payload);
 }
 
 export function logWarn(message: string, payload?: unknown) {
-  if (typeof payload === "undefined") {
-    console.warn(formatPrefix(message));
-    return;
-  }
-  console.warn(formatPrefix(message), payload);
+  emit("warn", message, payload);
 }
 
 export function logError(message: string, payload?: unknown) {
-  if (typeof payload === "undefined") {
-    console.error(formatPrefix(message));
-    return;
-  }
-  console.error(formatPrefix(message), payload);
+  emit("error", message, payload);
 }

@@ -25,7 +25,13 @@ import {
   isFinalizeRequested,
 } from "./lib/run-shell-tracker.js";
 import { resolveTaskFinalizeTimeoutMs } from "./lib/run-artifacts-finalize.js";
-import { logError, logInfo, logWarn } from "./lib/app-logger.js";
+import {
+  agentTestingLogSink,
+  appendAgentTestingLogText,
+  beginAgentTestingLog,
+  flushAgentTestingLog,
+} from "./lib/agent-testing-log.js";
+import { logError, logInfo, logWarn, setLogSink } from "./lib/app-logger.js";
 import {
   agentDebugEventsEnabled,
   agentThinkingLogsEnabled,
@@ -1055,7 +1061,9 @@ async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime
     // Log text streaming (Agent's response)
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       streamedText = true;
-      process.stdout.write(event.assistantMessageEvent.delta);
+      const delta = event.assistantMessageEvent.delta;
+      appendAgentTestingLogText(delta);
+      process.stdout.write(delta);
     }
     
     // Log tool calls (when Agent decides to use a tool)
@@ -1106,6 +1114,7 @@ async function runExtensionAgent(queueEntry: QueueEntryWithIncomingTime, runtime
           .join("");
         if (text.length > 0) {
           streamedText = true;
+          appendAgentTestingLogText(text);
           process.stdout.write(text);
         }
       }
@@ -1164,6 +1173,9 @@ async function executeRunForCoordinator(request: RunRequest): Promise<void> {
 
   const taskLabel = `id=${request.extensionId}, runId=${request.sessionId}`;
   const sidecarDir = resolveExtensionSidecarRoot(queueEntry);
+  const runId = request.sessionId;
+  beginAgentTestingLog(runId);
+  setLogSink(agentTestingLogSink);
   logInfo("[browseragent] task started", {
     extensionId: request.extensionId,
     version: request.version,
@@ -1175,7 +1187,7 @@ async function executeRunForCoordinator(request: RunRequest): Promise<void> {
       runExtensionAgent(queueEntry, runtime),
       taskTimeoutMs,
       taskLabel,
-      { sidecarDir, runId: request.sessionId },
+      { sidecarDir, runId },
     );
     if (isSessionCancelled(request.sessionId)) {
       status = loadStatus();
@@ -1206,6 +1218,15 @@ async function executeRunForCoordinator(request: RunRequest): Promise<void> {
       logError("[browseragent] task timeout", { taskLabel, timeoutMs: taskTimeoutMs });
     } else {
       logError("[browseragent] task failed", { taskLabel, error: errorMessage });
+    }
+  } finally {
+    setLogSink(null);
+    try {
+      const dest = flushAgentTestingLog({ sidecarDir, runId });
+      logInfo("[browseragent] wrote agent_testing.log", { dest, runId });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logWarn("[browseragent] agent_testing.log write failed", { runId, error: message });
     }
   }
 }
@@ -1396,6 +1417,8 @@ async function runDirectExtensionOnce(
   );
 
   const sidecarDir = resolveExtensionSidecarRoot(queueEntry);
+  beginAgentTestingLog(runId);
+  setLogSink(agentTestingLogSink);
   try {
     await runWithTimeoutAndFinalize(
       runExtensionAgent(queueEntry, runtime),
@@ -1410,7 +1433,6 @@ async function runDirectExtensionOnce(
       queueEntry
     );
     logInfo("[browseragent] direct run completed", { taskLabel });
-    process.exit(0);
   } catch (error: any) {
     const errorMessage = error?.message ?? String(error);
     const isTimeout = typeof errorMessage === "string" && errorMessage.startsWith("Task timed out after");
@@ -1425,8 +1447,21 @@ async function runDirectExtensionOnce(
     } else {
       logError("[browseragent] direct run failed", { taskLabel, error: errorMessage });
     }
+    setLogSink(null);
+    try {
+      flushAgentTestingLog({ sidecarDir, runId });
+    } catch {
+      // non-fatal
+    }
     process.exit(1);
   }
+  setLogSink(null);
+  try {
+    flushAgentTestingLog({ sidecarDir, runId });
+  } catch {
+    // non-fatal
+  }
+  process.exit(0);
 }
 
 async function main() {
