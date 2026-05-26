@@ -3,7 +3,11 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const NETWORK_FILTER = process.env.AGENT_NETWORK_FILTER ?? "https?://";
-const REQUESTS_CMD = `playwright-cli requests --filter=${JSON.stringify(NETWORK_FILTER)}`;
+/** playwright-cli hides successful static assets unless --static is set. */
+const INCLUDE_STATIC =
+  process.env.AGENT_NETWORK_INCLUDE_STATIC?.trim().toLowerCase() !== "0" &&
+  process.env.AGENT_NETWORK_INCLUDE_STATIC?.trim().toLowerCase() !== "false";
+const REQUESTS_CMD = `playwright-cli requests${INCLUDE_STATIC ? " --static" : ""} --filter=${JSON.stringify(NETWORK_FILTER)}`;
 const LEGACY_NETWORK_CMD = `playwright-cli network --request-headers --filter=${JSON.stringify(NETWORK_FILTER)}`;
 
 export type NetworkRequestEntry = {
@@ -24,6 +28,7 @@ export type NetworkLog = {
   capturedAt: string;
   source: "playwright-cli requests" | "playwright-cli network";
   filter: string;
+  includeStatic: boolean;
   /** Exclusions applied when saving (not playwright-cli filter). */
   resourceTypes: string[];
   requestCount: number;
@@ -69,9 +74,13 @@ export function parsePlaywrightNetworkOutput(stdout: string): NetworkRequestEntr
   let inHeaders = false;
 
   // Status may be `[200]` or `[200] OK` depending on playwright-cli version.
-  const lineRe = /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(\S+)\s+=>\s+\[(\d+)\](?:\s+\S+)?\s*$/;
-  const linePendingRe = /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(\S+)\s+=>\s+\[\]\s*$/;
-  const lineFailedRe = /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(\S+)\s+=>\s+\[FAILED\]\s+(.+)\s*$/;
+  // URL: greedy `.+?` before `=>` (not `\S+`) so query strings with `&` and `=` are kept intact.
+  const lineRe =
+    /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(.+?)\s+=>\s+\[(\d+)\](?:\s+\S+)?\s*$/;
+  const linePendingRe = /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(.+?)\s+=>\s+\[\]\s*$/;
+  const lineFailedRe =
+    /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(.+?)\s+=>\s+\[FAILED\]\s+(.+)\s*$/;
+  const lineInFlightRe = /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(.+?)\s*$/;
 
   const pushCurrent = () => {
     if (!current) return;
@@ -99,7 +108,7 @@ export function parsePlaywrightNetworkOutput(stdout: string): NetworkRequestEntr
       pushCurrent();
       current = {
         method: match[1],
-        url: match[2],
+        url: match[2].trim(),
         status: Number(match[3]),
         requestHeaders: {},
       };
@@ -111,7 +120,7 @@ export function parsePlaywrightNetworkOutput(stdout: string): NetworkRequestEntr
       pushCurrent();
       current = {
         method: pending[1],
-        url: pending[2],
+        url: pending[2].trim(),
         status: null,
         requestHeaders: {},
       };
@@ -123,10 +132,22 @@ export function parsePlaywrightNetworkOutput(stdout: string): NetworkRequestEntr
       pushCurrent();
       current = {
         method: failed[1],
-        url: failed[2],
+        url: failed[2].trim(),
         status: null,
         failed: true,
         errorText: failed[3].trim(),
+        requestHeaders: {},
+      };
+      continue;
+    }
+
+    const inFlight = trimmed.match(lineInFlightRe);
+    if (inFlight && !trimmed.includes("=>")) {
+      pushCurrent();
+      current = {
+        method: inFlight[1],
+        url: inFlight[2].trim(),
+        status: null,
         requestHeaders: {},
       };
       continue;
@@ -190,15 +211,19 @@ export function saveNetworkCapture(params: {
   sidecarDir: string;
   runId: string;
 }): { dest: string; count: number } {
-  const { requests, source } = collectNetworkFromCli(params.sidecarDir);
+  const { stdout, source } = runPlaywrightNetwork(params.sidecarDir);
+  const requests = parsePlaywrightNetworkOutput(stdout);
   const runDir = path.join(params.sidecarDir, "ai_testing", params.runId);
   mkdirSync(runDir, { recursive: true });
   const dest = path.join(runDir, "network.json");
+  const rawDest = path.join(runDir, "network-cli-raw.txt");
+  writeFileSync(rawDest, `${extractNetworkCliText(stdout)}\n`, "utf8");
 
   const log: NetworkLog = {
     capturedAt: new Date().toISOString(),
     source,
     filter: NETWORK_FILTER,
+    includeStatic: INCLUDE_STATIC,
     resourceTypes: ["all-except-chrome-extension"],
     requestCount: requests.length,
     requests,
