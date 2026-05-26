@@ -73,7 +73,7 @@ npm run dev
 7. **Task timeout** per run: when the agent budget is exceeded, the service **finalizes artifacts before** marking `error`:
    - Waits for in-flight `shell_command` (e.g. `playwright-cli screenshot`) to finish.
    - Syncs screenshot files referenced in `recordings.json` under `ai_testing/<runId>/`.
-   - Saves `ai_testing/<runId>/network.json` via `playwright-cli network` (empty `requests` if none).
+   - Saves `ai_testing/<runId>/network.json` via `playwright-cli requests` (empty `requests` if none).
    - Then sets status to `error` with `Task timed out after <ms>ms (...)`.
    - Agent budget default: 10 minutes (`600000` ms), override with `TASK_TIMEOUT_MS`.
    - Finalize budget default: 2 minutes (`120000` ms), override with `TASK_FINALIZE_TIMEOUT_MS` (extra wall time after the agent budget; not included in the timeout error message).

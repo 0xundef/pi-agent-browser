@@ -877,13 +877,13 @@ function createStartNetworkCaptureTool(sidecarDir: string): AgentTool<typeof emp
     name: "start_network_capture",
     label: "Start network capture",
     description:
-      "Clears the playwright-cli in-session network log. Call right after `playwright-cli open` so only traffic from this test run is saved. Capture itself uses `playwright-cli network` when you call capture_network_traffic.",
+      "Clears the playwright-cli in-session request list (`playwright-cli requests --clear`). Call right after `playwright-cli open` so only traffic from this test run is saved. Offline analysis uses `capture_network_traffic` output, not session-scoped `request <index>`.",
     parameters: emptyToolParameters,
     async execute() {
       try {
         clearNetworkCapture(sidecarDir);
         return {
-          content: [{ type: "text", text: "Network log cleared (playwright-cli network --clear)." }],
+          content: [{ type: "text", text: "Request list cleared (playwright-cli requests --clear)." }],
           details: { ok: true }
         };
       } catch (err) {
@@ -904,7 +904,7 @@ function createCaptureNetworkTrafficTool(
   return {
     name: "capture_network_traffic",
     label: "Save captured network traffic",
-    description: `Runs playwright-cli network (--request-headers, https filter), saves all matching requests except chrome-extension://, writes ai_testing/${runId}/network.json. Call before validate_recordings.`,
+    description: `Runs playwright-cli requests (https filter), saves matching entries except chrome-extension:// to ai_testing/${runId}/network.json for offline review. Call before validate_recordings; do not rely on request <index> after the session ends.`,
     parameters: emptyToolParameters,
     async execute() {
       try {
@@ -913,7 +913,7 @@ function createCaptureNetworkTrafficTool(
           content: [
             {
               type: "text",
-              text: `Saved ${count} request(s) via playwright-cli network to ${dest}`
+              text: `Saved ${count} request(s) to ${dest} (playwright-cli requests)`
             }
           ],
           details: { dest, count, ok: true }

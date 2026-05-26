@@ -1,9 +1,10 @@
 import { execSync } from "node:child_process";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const NETWORK_FILTER = process.env.AGENT_NETWORK_FILTER ?? "https?://";
-const NETWORK_CMD = `playwright-cli network --request-headers --filter=${JSON.stringify(NETWORK_FILTER)}`;
+const REQUESTS_CMD = `playwright-cli requests --filter=${JSON.stringify(NETWORK_FILTER)}`;
+const LEGACY_NETWORK_CMD = `playwright-cli network --request-headers --filter=${JSON.stringify(NETWORK_FILTER)}`;
 
 export type NetworkRequestEntry = {
   method: string;
@@ -17,7 +18,7 @@ export type NetworkRequestEntry = {
 
 export type NetworkLog = {
   capturedAt: string;
-  source: "playwright-cli network";
+  source: "playwright-cli requests" | "playwright-cli network";
   filter: string;
   /** Exclusions applied when saving (not playwright-cli filter). */
   resourceTypes: string[];
@@ -55,7 +56,7 @@ export function extractNetworkCliText(stdout: string): string {
   return stdout;
 }
 
-/** Parses `playwright-cli network` text output. */
+/** Parses `playwright-cli requests` / legacy `network` text output. */
 export function parsePlaywrightNetworkOutput(stdout: string): NetworkRequestEntry[] {
   const text = extractNetworkCliText(stdout);
   const lines = text.split("\n");
@@ -131,19 +132,24 @@ export function parsePlaywrightNetworkOutput(stdout: string): NetworkRequestEntr
   return entries;
 }
 
-function runPlaywrightNetwork(sidecarDir: string): string {
+function runPlaywrightNetwork(sidecarDir: string): { stdout: string; source: NetworkLog["source"] } {
   try {
-    return execInSidecar(sidecarDir, NETWORK_CMD);
+    return { stdout: execInSidecar(sidecarDir, REQUESTS_CMD), source: "playwright-cli requests" };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    if (!/unknown command:\s*network/i.test(message)) throw err;
-    const fallback = `playwright-cli requests --filter=${JSON.stringify(NETWORK_FILTER)}`;
-    return execInSidecar(sidecarDir, fallback);
+    if (!/unknown command:\s*requests/i.test(message)) throw err;
+    return { stdout: execInSidecar(sidecarDir, LEGACY_NETWORK_CMD), source: "playwright-cli network" };
   }
 }
 
-/** Clears the in-session network list (call after browser open). */
+/** Clears the in-session request list (call after browser open). */
 export function clearNetworkCapture(sidecarDir: string): void {
+  try {
+    execInSidecar(sidecarDir, "playwright-cli requests --clear");
+    return;
+  } catch {
+    // fall through to legacy CLI
+  }
   try {
     execInSidecar(sidecarDir, "playwright-cli network --clear");
   } catch {
@@ -151,25 +157,28 @@ export function clearNetworkCapture(sidecarDir: string): void {
   }
 }
 
-/** Runs `playwright-cli network` and returns entries (excludes chrome-extension:// only). */
-export function collectNetworkFromCli(sidecarDir: string): NetworkRequestEntry[] {
-  const stdout = runPlaywrightNetwork(sidecarDir);
-  return parsePlaywrightNetworkOutput(stdout);
+/** Runs `playwright-cli requests` and returns entries (excludes chrome-extension:// only). */
+export function collectNetworkFromCli(sidecarDir: string): {
+  requests: NetworkRequestEntry[];
+  source: NetworkLog["source"];
+} {
+  const { stdout, source } = runPlaywrightNetwork(sidecarDir);
+  return { requests: parsePlaywrightNetworkOutput(stdout), source };
 }
 
-/** Writes ai_testing/<runId>/network.json from playwright-cli network output (requests may be empty). */
+/** Writes ai_testing/<runId>/network.json from playwright-cli requests output (requests may be empty). */
 export function saveNetworkCapture(params: {
   sidecarDir: string;
   runId: string;
 }): { dest: string; count: number } {
-  const requests = collectNetworkFromCli(params.sidecarDir);
+  const { requests, source } = collectNetworkFromCli(params.sidecarDir);
   const runDir = path.join(params.sidecarDir, "ai_testing", params.runId);
   mkdirSync(runDir, { recursive: true });
   const dest = path.join(runDir, "network.json");
 
   const log: NetworkLog = {
     capturedAt: new Date().toISOString(),
-    source: "playwright-cli network",
+    source,
     filter: NETWORK_FILTER,
     resourceTypes: ["all-except-chrome-extension"],
     requestCount: requests.length,

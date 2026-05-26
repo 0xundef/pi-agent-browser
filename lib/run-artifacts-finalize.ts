@@ -74,7 +74,7 @@ function writeEmptyNetworkJson(runDir: string, reason: string): string {
   const dest = path.join(runDir, "network.json");
   const log: NetworkLog = {
     capturedAt: new Date().toISOString(),
-    source: "playwright-cli network",
+    source: "playwright-cli requests",
     filter: process.env.AGENT_NETWORK_FILTER ?? "https?://",
     resourceTypes: ["all-except-chrome-extension"],
     requestCount: 0,
