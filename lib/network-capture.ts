@@ -10,6 +10,10 @@ export type NetworkRequestEntry = {
   method: string;
   url: string;
   status: number | null;
+  /** True when playwright-cli reports `=> [FAILED]` (no HTTP response, e.g. DNS / TLS / blocked). */
+  failed?: boolean;
+  /** Chromium net error text when `failed` is true, e.g. `net::ERR_NAME_NOT_RESOLVED`. */
+  errorText?: string;
   /** Optional hint for UI; not used for filtering. */
   resourceType?: "fetch" | "xhr" | "websocket";
   requestedAt?: string;
@@ -67,6 +71,7 @@ export function parsePlaywrightNetworkOutput(stdout: string): NetworkRequestEntr
   // Status may be `[200]` or `[200] OK` depending on playwright-cli version.
   const lineRe = /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(\S+)\s+=>\s+\[(\d+)\](?:\s+\S+)?\s*$/;
   const linePendingRe = /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(\S+)\s+=>\s+\[\]\s*$/;
+  const lineFailedRe = /^(?:\d+\.\s+)?\[([A-Z]+)\]\s+(\S+)\s+=>\s+\[FAILED\]\s+(.+)\s*$/;
 
   const pushCurrent = () => {
     if (!current) return;
@@ -108,6 +113,20 @@ export function parsePlaywrightNetworkOutput(stdout: string): NetworkRequestEntr
         method: pending[1],
         url: pending[2],
         status: null,
+        requestHeaders: {},
+      };
+      continue;
+    }
+
+    const failed = trimmed.match(lineFailedRe);
+    if (failed) {
+      pushCurrent();
+      current = {
+        method: failed[1],
+        url: failed[2],
+        status: null,
+        failed: true,
+        errorText: failed[3].trim(),
         requestHeaders: {},
       };
       continue;
